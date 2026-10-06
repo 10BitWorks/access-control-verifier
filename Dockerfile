@@ -1,4 +1,4 @@
-FROM rust:1.85-alpine AS builder
+FROM rust:alpine AS builder
 
 WORKDIR /usr/src/app
 RUN apk add --no-cache musl-dev sqlite-dev pkgconf

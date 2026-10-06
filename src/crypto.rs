@@ -64,6 +64,7 @@ impl SunCmac {
         Ok(Self(bytes))
     }
 }
+#[derive(Clone)]
 pub struct Key(pub [u8; 16]);
 
 impl Key {

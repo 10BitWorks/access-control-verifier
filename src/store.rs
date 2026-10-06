@@ -283,6 +283,44 @@ impl Store {
         }
     }
 
+    pub fn tag_exists(&self, uid: &str) -> rusqlite::Result<bool> {
+        self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tags WHERE uid = ?1)",
+            params![uid],
+            |row| row.get(0),
+        )
+    }
+
+    pub fn audit_event(
+        &mut self,
+        timestamp: &str,
+        device_id: Option<&str>,
+        uid: Option<&str>,
+        counter: Option<i64>,
+        decision: &str,
+        reason: &str,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO audit_log (ts, device_id, uid, counter, decision, reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![timestamp, device_id, uid, counter, decision, reason],
+        )?;
+        Ok(())
+    }
+
+    pub fn member_display_name(&self, uid: &str) -> rusqlite::Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT m.display_name
+                 FROM tags t
+                 JOIN members m ON m.member_key = t.member_key
+                 WHERE t.uid = ?1",
+                params![uid],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
     pub fn conn_mut(&mut self) -> &mut Connection {
         &mut self.conn
     }

@@ -1,7 +1,3 @@
-#[path = "../src/main.rs"]
-#[allow(dead_code)]
-mod main;
-
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -11,7 +7,7 @@ use tower::ServiceExt; // for `oneshot`
 
 #[tokio::test]
 async fn test_healthz() {
-    let app = main::app();
+    let app = access_control_verifier::app();
 
     let response = app
         .oneshot(

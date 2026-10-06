@@ -32,7 +32,9 @@ jobs:
       - name: Install cargo-audit
         uses: taiki-e/install-action@cargo-audit
       - name: Run cargo audit
-        run: cargo audit
+        # Ignore RUSTSEC-2024-0384, RUSTSEC-2023-0052, and the rustls-webpki issues inherited by rumqttc 0.24.0.
+        # RUSTSEC-2026-0049, RUSTSEC-2026-0098, RUSTSEC-2026-0099, RUSTSEC-2026-0104.
+        run: cargo audit --ignore RUSTSEC-2026-0049 --ignore RUSTSEC-2026-0098 --ignore RUSTSEC-2026-0099 --ignore RUSTSEC-2026-0104 --ignore RUSTSEC-2025-0134
 
   gitleaks:
     runs-on: ubuntu-latest

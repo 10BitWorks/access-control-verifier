@@ -8,6 +8,9 @@ pub mod writer;
 
 use axum::{routing::get, Router};
 
-pub fn app() -> Router {
-    Router::new().route("/healthz", get(|| async { "ok" }))
+pub fn app(state: api::AppState) -> Router {
+    Router::new()
+        .route("/healthz", get(|| async { "ok" }))
+        .merge(api::router(state.clone()))
+        .merge(admin::router(state))
 }

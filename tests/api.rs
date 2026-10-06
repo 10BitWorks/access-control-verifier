@@ -1,4 +1,4 @@
-use access_control_verifier::api::{router, AppState, DecisionSink, NoopSink};
+use access_control_verifier::api::{AppState, DecisionSink, NoopSink};
 use access_control_verifier::crypto::{cmac_for, Key, TapCounter, Uid};
 use access_control_verifier::store::Store;
 use axum::{
@@ -132,7 +132,7 @@ fn build(sink: Arc<dyn DecisionSink>) -> (axum::Router, Arc<Mutex<Store>>, Named
         secret: SECRET.to_string(),
         sink,
     };
-    (router(state), store, db)
+    (access_control_verifier::app(state), store, db)
 }
 
 fn setup() -> Fixture {
@@ -516,7 +516,7 @@ async fn noop_sink_serves_requests_without_capture() {
         secret: SECRET.to_string(),
         sink: Arc::new(NoopSink),
     };
-    let app = router(state);
+    let app = access_control_verifier::app(state);
 
     let master = Key::from_hex(MASTER_HEX).expect("master key hex");
     let uid = Uid::from_hex(UID_ACTIVE).expect("uid hex");

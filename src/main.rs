@@ -26,8 +26,27 @@ async fn main() -> anyhow::Result<()> {
 
     match args.cmd {
         Some(Command::Healthcheck) => {
-            println!("ok");
-            return Ok(());
+            let bind_addr = env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8000".to_string());
+            // If it bound to 0.0.0.0, we can connect on 127.0.0.1
+            let host_port = bind_addr.replace("0.0.0.0", "127.0.0.1");
+            let url = format!("http://{}/healthz", host_port);
+
+            // Simple HTTP GET
+            let client = reqwest::Client::new();
+            match client.get(&url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    println!("ok");
+                    return Ok(());
+                }
+                Ok(resp) => {
+                    eprintln!("healthcheck failed: HTTP {}", resp.status());
+                    process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("healthcheck failed: {}", e);
+                    process::exit(1);
+                }
+            }
         }
         None => {}
     }

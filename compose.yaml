@@ -1,0 +1,15 @@
+services:
+  verifier:
+    image: ghcr.io/10bitworks/access-control-verifier:latest
+    build: .
+    container_name: access-control-verifier
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - verifier-data:/data
+
+volumes:
+  verifier-data:

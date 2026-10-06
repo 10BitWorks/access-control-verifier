@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>10BitWorks Access Admin</title>
+    <style>
+        body { font-family: sans-serif; margin: 20px; }
+        h2 { margin-top: 30px; border-bottom: 1px solid #ccc; padding-bottom: 5px; }
+        table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        form { background: #f9f9f9; padding: 15px; border: 1px solid #ddd; margin-bottom: 20px; }
+        input, select, button { margin: 5px 0; padding: 5px; }
+        .error { color: red; }
+    </style>
+</head>
+<body>
+    <h1>Access Control Admin Dashboard</h1>
+    <div id="error" class="error"></div>
+
+    <h2>Tags</h2>
+    <table id="tags-table">
+        <tr><th>UID</th><th>Member Key</th><th>Status</th><th>Version</th><th>Counter</th><th>Enrolled</th><th>Action</th></tr>
+    </table>
+    
+    <h3>Enroll Tag</h3>
+    <form id="enroll-form">
+        <input type="text" id="enroll-uid" placeholder="UID (hex)" required>
+        <input type="text" id="enroll-member" placeholder="Member Key" required>
+        <input type="number" id="enroll-version" placeholder="Key Version" value="1" required>
+        <button type="submit">Enroll</button>
+    </form>
+
+    <h2>Members</h2>
+    <table id="members-table">
+        <tr><th>Member Key</th><th>Display Name</th><th>Active Until</th><th>Source</th></tr>
+    </table>
+
+    <h2>Devices</h2>
+    <table id="devices-table">
+        <tr><th>Device ID</th><th>Role</th><th>Offline Verify</th><th>Presence</th><th>Last Seen</th></tr>
+    </table>
+
+    <h3>Upsert Device</h3>
+    <form id="device-form">
+        <input type="text" id="dev-id" placeholder="Device ID" required>
+        <input type="text" id="dev-role" placeholder="Role (e.g. door)" required>
+        <label><input type="checkbox" id="dev-offline"> Offline Verify</label>
+        <button type="submit">Save Device</button>
+    </form>
+
+    <h2>Overrides</h2>
+    <table id="overrides-table">
+        <tr><th>ID</th><th>Member</th><th>UID</th><th>Kind</th><th>Expires</th><th>Note</th><th>Created</th></tr>
+    </table>
+
+    <h3>Create Override</h3>
+    <form id="override-form">
+        <input type="text" id="ov-member" placeholder="Member Key (optional)">
+        <input type="text" id="ov-uid" placeholder="UID (optional)">
+        <select id="ov-kind"><option value="ban">Ban</option><option value="allow">Allow</option></select>
+        <input type="text" id="ov-expires" placeholder="Expires At (ISO8601, optional)">
+        <input type="text" id="ov-note" placeholder="Note">
+        <button type="submit">Create</button>
+    </form>
+
+    <h2>Audit Log (Recent 50)</h2>
+    <table id="audit-table">
+        <tr><th>ID</th><th>Time</th><th>Device</th><th>UID</th><th>Counter</th><th>Decision</th><th>Reason</th></tr>
+    </table>
+
+    <script>
+        // Use current auth/cookie headers for fetch. 
+        // If testing via API, ensure Bearer token or cookie is set.
+        async function api(path, options = {}) {
+            const res = await fetch('/admin/api' + path, options);
+            if (!res.ok) {
+                const err = await res.json();
+                document.getElementById('error').innerText = err.error || 'API Error';
+                throw new Error(err.error);
+            }
+            return res.json();
+        }
+
+        async function load() {
+            document.getElementById('error').innerText = '';
+            
+            api('/tags').then(tags => {
+                const tbody = document.getElementById('tags-table');
+                tbody.innerHTML = '<tr><th>UID</th><th>Member Key</th><th>Status</th><th>Version</th><th>Counter</th><th>Enrolled</th><th>Action</th></tr>';
+                tags.forEach(t => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `<td>${t.uid}</td><td>${t.member_key}</td><td>${t.status}</td><td>${t.key_version}</td><td>${t.last_counter}</td><td>${t.enrolled_at}</td>
+                    <td><button onclick="revoke('${t.uid}')">Revoke</button></td>`;
+                    tbody.appendChild(tr);
+                });
+            });
+
+            api('/members').then(members => {
+                const tbody = document.getElementById('members-table');
+                tbody.innerHTML = '<tr><th>Member Key</th><th>Display Name</th><th>Active Until</th><th>Source</th></tr>';
+                members.forEach(m => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `<td>${m.member_key}</td><td>${m.display_name||''}</td><td>${m.active_until}</td><td>${m.source}</td>`;
+                    tbody.appendChild(tr);
+                });
+            });
+
+            api('/devices').then(devices => {
+                const tbody = document.getElementById('devices-table');
+                tbody.innerHTML = '<tr><th>Device ID</th><th>Role</th><th>Offline Verify</th><th>Presence</th><th>Last Seen</th></tr>';
+                devices.forEach(d => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `<td>${d.device_id}</td><td>${d.role}</td><td>${d.offline_verify}</td><td>${d.presence}</td><td>${d.last_seen||''}</td>`;
+                    tbody.appendChild(tr);
+                });
+            });
+
+            api('/overrides').then(ovs => {
+                const tbody = document.getElementById('overrides-table');
+                tbody.innerHTML = '<tr><th>ID</th><th>Member</th><th>UID</th><th>Kind</th><th>Expires</th><th>Note</th><th>Created</th></tr>';
+                ovs.forEach(o => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `<td>${o.id}</td><td>${o.member_key||''}</td><td>${o.uid||''}</td><td>${o.kind}</td><td>${o.expires_at||''}</td><td>${o.note||''}</td><td>${o.created_at}</td>`;
+                    tbody.appendChild(tr);
+                });
+            });
+
+            api('/audit').then(logs => {
+                const tbody = document.getElementById('audit-table');
+                tbody.innerHTML = '<tr><th>ID</th><th>Time</th><th>Device</th><th>UID</th><th>Counter</th><th>Decision</th><th>Reason</th></tr>';
+                logs.forEach(l => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `<td>${l.id}</td><td>${l.ts}</td><td>${l.device_id||''}</td><td>${l.uid||''}</td><td>${l.counter||''}</td><td>${l.decision}</td><td>${l.reason}</td>`;
+                    tbody.appendChild(tr);
+                });
+            });
+        }
+
+        window.revoke = async function(uid) {
+            if (confirm(`Revoke tag ${uid}?`)) {
+                await api(`/tags/${uid}/revoke`, {method: 'POST'});
+                load();
+            }
+        };
+
+        document.getElementById('enroll-form').onsubmit = async (e) => {
+            e.preventDefault();
+            const body = {
+                uid: document.getElementById('enroll-uid').value,
+                member_key: document.getElementById('enroll-member').value,
+                key_version: parseInt(document.getElementById('enroll-version').value)
+            };
+            await api('/tags/enroll', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)
+            });
+            e.target.reset();
+            load();
+        };
+
+        document.getElementById('device-form').onsubmit = async (e) => {
+            e.preventDefault();
+            const body = {
+                device_id: document.getElementById('dev-id').value,
+                role: document.getElementById('dev-role').value,
+                offline_verify: document.getElementById('dev-offline').checked
+            };
+            await api('/devices', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)
+            });
+            e.target.reset();
+            load();
+        };
+
+        document.getElementById('override-form').onsubmit = async (e) => {
+            e.preventDefault();
+            const member = document.getElementById('ov-member').value;
+            const uid = document.getElementById('ov-uid').value;
+            const body = {
+                member_key: member ? member : null,
+                uid: uid ? uid : null,
+                kind: document.getElementById('ov-kind').value,
+                expires_at: document.getElementById('ov-expires').value || null,
+                note: document.getElementById('ov-note').value || null
+            };
+            await api('/overrides', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)
+            });
+            e.target.reset();
+            load();
+        };
+
+        load();
+    </script>
+</body>
+</html>

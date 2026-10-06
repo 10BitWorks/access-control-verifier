@@ -6,7 +6,6 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::Deserialize;
 use serde_json::json;
 use std::env;
@@ -54,43 +53,19 @@ async fn auth_middleware(
         }
     }
 
-    // 2. Check OIDC proxy headers (e.g. from Authentik/oauth2-proxy)
-    if let Some(email) = headers
-        .get("x-authentik-email")
-        .or_else(|| headers.get("x-forwarded-email"))
-    {
-        if !email.is_empty() {
+    // 2. Check trusted proxy header only if PROXY_AUTH_SECRET is configured and matches
+    if let (Some(email), Some(secret_hdr)) = (
+        headers
+            .get("x-authentik-email")
+            .or_else(|| headers.get("x-forwarded-email")),
+        headers.get("x-proxy-secret"),
+    ) {
+        let expected_secret = env::var("PROXY_AUTH_SECRET").unwrap_or_default();
+        if !expected_secret.is_empty()
+            && secret_hdr.as_bytes() == expected_secret.as_bytes()
+            && !email.is_empty()
+        {
             return next.run(req).await;
-        }
-    }
-
-    // Spec: "OIDC session / cookie or OIDC bearer token (with configurable issuer AUTHENTIK_OIDC_ISSUER, default https://auth.10bitworks.org/application/o/authorize/ or verified JWT/userinfo). If neither is valid, returns 401 Unauthorized."
-
-    if let Some(auth_header) = headers.get(axum::http::header::AUTHORIZATION) {
-        if let Ok(auth_str) = auth_header.to_str() {
-            if let Some(token) = auth_str.strip_prefix("Bearer ") {
-                // Check if it's a JWT with the correct issuer
-                let issuer = env::var("AUTHENTIK_OIDC_ISSUER").unwrap_or_else(|_| {
-                    "https://auth.10bitworks.org/application/o/authorize/".to_string()
-                });
-
-                // Extremely simple JWT decode (header.payload.signature)
-                let parts: Vec<&str> = token.split('.').collect();
-                if parts.len() == 3 {
-                    if let Ok(payload_bytes) = URL_SAFE_NO_PAD.decode(parts[1]) {
-                        if let Ok(payload_val) =
-                            serde_json::from_slice::<serde_json::Value>(&payload_bytes)
-                        {
-                            if let Some(iss) = payload_val.get("iss").and_then(|i| i.as_str()) {
-                                if iss == issuer {
-                                    // In a fully secure setup, we MUST verify the signature.
-                                    return next.run(req).await;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 

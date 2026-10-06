@@ -51,7 +51,7 @@ fn error_response(status: StatusCode, message: &str) -> Response {
     (status, Json(json!({ "error": message }))).into_response()
 }
 
-fn map_store_reason(reason: &str) -> String {
+pub fn map_store_reason(reason: &str) -> String {
     match reason {
         "tag_inactive" | "override_ban" => "override".to_string(),
         "unknown_member" | "member_inactive" => "member_inactive".to_string(),

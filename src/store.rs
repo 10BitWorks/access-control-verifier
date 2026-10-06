@@ -473,6 +473,172 @@ impl Store {
         Ok(())
     }
 
+    pub fn list_tags(&self) -> rusqlite::Result<Vec<TagInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT uid, member_key, status, key_version, last_counter, enrolled_at
+             FROM tags ORDER BY enrolled_at, uid",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(TagInfo {
+                uid: r.get(0)?,
+                member_key: r.get(1)?,
+                status: r.get(2)?,
+                key_version: r.get(3)?,
+                last_counter: r.get(4)?,
+                enrolled_at: r.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn list_members(&self) -> rusqlite::Result<Vec<MemberInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT member_key, display_name, active_until, source
+             FROM members ORDER BY member_key",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(MemberInfo {
+                member_key: r.get(0)?,
+                display_name: r.get(1)?,
+                active_until: r.get(2)?,
+                source: r.get(3)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn list_devices(&self) -> rusqlite::Result<Vec<DeviceInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT device_id, role, offline_verify, presence, last_seen
+             FROM devices ORDER BY device_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(DeviceInfo {
+                device_id: r.get(0)?,
+                role: r.get(1)?,
+                offline_verify: r.get(2)?,
+                presence: r.get(3)?,
+                last_seen: r.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn upsert_device(
+        &mut self,
+        device_id: &str,
+        role: &str,
+        offline_verify: bool,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO devices (device_id, role, offline_verify)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(device_id) DO UPDATE SET
+               role = excluded.role,
+               offline_verify = excluded.offline_verify",
+            params![device_id, role, offline_verify],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_audit(
+        &self,
+        limit: u32,
+        uid: Option<&str>,
+        decision: Option<&str>,
+    ) -> rusqlite::Result<Vec<AuditInfo>> {
+        let mut sql = String::from(
+            "SELECT id, ts, device_id, uid, counter, decision, reason
+             FROM audit_log WHERE 1=1",
+        );
+        let mut binds: Vec<rusqlite::types::Value> = Vec::new();
+        if let Some(u) = uid {
+            binds.push(rusqlite::types::Value::Text(u.to_string()));
+            sql.push_str(&format!(" AND uid = ?{}", binds.len()));
+        }
+        if let Some(d) = decision {
+            binds.push(rusqlite::types::Value::Text(d.to_string()));
+            sql.push_str(&format!(" AND decision = ?{}", binds.len()));
+        }
+        binds.push(rusqlite::types::Value::Integer(i64::from(limit)));
+        sql.push_str(&format!(" ORDER BY id DESC LIMIT ?{}", binds.len()));
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(binds), |r| {
+            Ok(AuditInfo {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                device_id: r.get(2)?,
+                uid: r.get(3)?,
+                counter: r.get(4)?,
+                decision: r.get(5)?,
+                reason: r.get(6)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_override(
+        &mut self,
+        member_key: Option<&str>,
+        uid: Option<&str>,
+        kind: &str,
+        expires_at: Option<&str>,
+        note: Option<&str>,
+        created_at: &str,
+    ) -> rusqlite::Result<i64> {
+        self.conn.execute(
+            "INSERT INTO overrides (member_key, uid, kind, expires_at, note, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![member_key, uid, kind, expires_at, note, created_at],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn list_overrides(&self) -> rusqlite::Result<Vec<OverrideInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, member_key, uid, kind, expires_at, note, created_at
+             FROM overrides ORDER BY id DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(OverrideInfo {
+                id: r.get(0)?,
+                member_key: r.get(1)?,
+                uid: r.get(2)?,
+                kind: r.get(3)?,
+                expires_at: r.get(4)?,
+                note: r.get(5)?,
+                created_at: r.get(6)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn sync_state(&self) -> rusqlite::Result<Option<SyncStateInfo>> {
+        self.conn
+            .query_row(
+                "SELECT last_success, last_attempt, detail FROM sync_state WHERE id = 1",
+                [],
+                |r| {
+                    Ok(SyncStateInfo {
+                        last_success: r.get(0)?,
+                        last_attempt: r.get(1)?,
+                        detail: r.get(2)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    pub fn list_config(&self) -> rusqlite::Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key, value FROM config ORDER BY key")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
     pub fn conn_mut(&mut self) -> &mut Connection {
         &mut self.conn
     }
@@ -494,4 +660,60 @@ pub enum JobTake {
     AlreadyConsumed(JobRow),
     Expired(JobRow),
     NotFound,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TagInfo {
+    pub uid: String,
+    pub member_key: String,
+    pub status: String,
+    pub key_version: i64,
+    pub last_counter: i64,
+    pub enrolled_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MemberInfo {
+    pub member_key: String,
+    pub display_name: Option<String>,
+    pub active_until: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DeviceInfo {
+    pub device_id: String,
+    pub role: String,
+    pub offline_verify: bool,
+    pub presence: String,
+    pub last_seen: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AuditInfo {
+    pub id: i64,
+    pub ts: String,
+    pub device_id: Option<String>,
+    pub uid: Option<String>,
+    pub counter: Option<i64>,
+    pub decision: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OverrideInfo {
+    pub id: i64,
+    pub member_key: Option<String>,
+    pub uid: Option<String>,
+    pub kind: String,
+    pub expires_at: Option<String>,
+    pub note: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SyncStateInfo {
+    pub last_success: Option<String>,
+    pub last_attempt: Option<String>,
+    pub detail: Option<String>,
 }

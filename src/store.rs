@@ -321,6 +321,43 @@ impl Store {
             .optional()
     }
 
+    pub fn presence_of(&self, device_id: &str) -> rusqlite::Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT presence FROM devices WHERE device_id = ?1",
+                params![device_id],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    pub fn touch_last_seen(&mut self, device_id: &str, timestamp: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE devices SET last_seen = ?1 WHERE device_id = ?2",
+            params![timestamp, device_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn acl_devices(&self) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT device_id FROM devices WHERE offline_verify = 1")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect()
+    }
+
+    pub fn acl_tag_rows(&self) -> rusqlite::Result<Vec<(String, Option<String>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.uid, m.active_until
+             FROM tags t
+             LEFT JOIN members m ON m.member_key = t.member_key
+             WHERE t.status = 'active'",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect()
+    }
+
     pub fn conn_mut(&mut self) -> &mut Connection {
         &mut self.conn
     }

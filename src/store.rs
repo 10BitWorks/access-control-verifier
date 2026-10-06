@@ -282,4 +282,8 @@ impl Store {
             Ok(AccessDecision::Denied("member_inactive".to_string()))
         }
     }
+
+    pub fn conn_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
 }

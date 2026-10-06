@@ -9,6 +9,7 @@ dependencies = [
  "aes",
  "anyhow",
  "axum",
+ "chrono",
  "clap",
  "cmac",
  "hex",

@@ -1,0 +1,11 @@
+title = "gitleaks config — access-control-verifier"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Deterministic AES/CMAC/MQTT test vectors in test fixtures — public test data, not secrets"
+paths = [
+    '''tests/crypto_vectors\.rs''',
+    '''tests/mqtt\.rs''',
+]

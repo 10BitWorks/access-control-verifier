@@ -1,6 +1,6 @@
 # Legacy Door Auth Business Rules (door1)
 
-This document captures the business rules from the legacy Django-based `door1` member authentication system (running at 10.7.1.244, LXC 204), primarily as implemented in `cobalt/my_door_auth.py` and `frontdoor/access_10Bit.py`.
+This document captures the business rules from the legacy Django-based `door1` member authentication system (running at door1, LXC 204), primarily as implemented in `cobalt/my_door_auth.py` and `frontdoor/access_10Bit.py`.
 
 ## Architecture Summary
 The legacy system operates as a cached proxy. The RFID reader reads a ROT13-obfuscated email from a card and sends it to the Django server. If the member is not in the local cache or access is denied, the reader triggers a cache update (`/membership/update`) which pulls recent orders from the Squarespace API, then retries. The admin UI exposes `MemberStatus` and `DateOfLastPayment` fields to determine door access.
@@ -26,4 +26,4 @@ The legacy system operates as a cached proxy. The RFID reader reads a ROT13-obfu
 - **Authentik Groups:** Replaces Squarespace order polling with direct Authentik group membership validation.
 - **Unified Policy:** Moves access logic from the Pi clients (cobalt/frontdoor) to a centralized Rust verifier API.
 - **Standardized Grace:** Implements configurable `GRACE_DAYS=5` / `LOCKOUT_DAYS=10` natively instead of hardcoded 35-day deltas.
-- **Decoupled Admin UI:** Relies on a standalone `overrides` table (Postgres) rather than a monolithic Django admin portal.
+- **Decoupled Admin UI:** Relies on a standalone `overrides` table (SQLite) rather than a monolithic Django admin portal.

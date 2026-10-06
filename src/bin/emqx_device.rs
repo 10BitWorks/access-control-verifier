@@ -59,7 +59,7 @@ Exit codes: 0 success, 1 apply request failed, 2 credentials missing.";
     about = "Create EMQX MQTT credentials and topic ACLs for one device (dry-run by default)",
     after_help = LONG_HELP
 )]
-struct Cli {
+pub struct Cli {
     /// Device identifier; used verbatim as the MQTT username and topic suffix.
     #[arg(long, value_name = "ID")]
     device_id: String,
@@ -179,18 +179,28 @@ pub fn build_user_payload(device_id: &str, password: &str) -> UserPayload {
     }
 }
 
-pub fn build_plan(api_url: &str, device_id: &str, role: Role, password: &str, mode: Mode) -> Plan {
-    let base = api_url.trim_end_matches('/');
+/// Build the REST plan for the parsed CLI options.
+///
+/// `mode` is derived from the flags: `--apply` (without `--dry-run`) selects
+/// [`Mode::Apply`], everything else the default [`Mode::DryRun`].
+pub fn build_plan(cli: &Cli, password: &str) -> Plan {
+    let base = cli.api_url.trim_end_matches('/');
+    let device_id = &cli.device_id;
+    let mode = if cli.apply && !cli.dry_run {
+        Mode::Apply
+    } else {
+        Mode::DryRun
+    };
     let user_body =
         serde_json::to_value(build_user_payload(device_id, password)).expect("serializable");
     let acl_body =
-        serde_json::to_value(vec![build_acl_entry(device_id, role)]).expect("serializable");
+        serde_json::to_value(vec![build_acl_entry(device_id, cli.role)]).expect("serializable");
     Plan {
         mode,
-        api_url: api_url.to_owned(),
-        device_id: device_id.to_owned(),
-        role,
-        mqtt_username: device_id.to_owned(),
+        api_url: cli.api_url.clone(),
+        device_id: device_id.clone(),
+        role: cli.role,
+        mqtt_username: device_id.clone(),
         steps: vec![
             Step {
                 name: "create_user".to_owned(),
@@ -288,21 +298,17 @@ async fn apply_plan(client: &reqwest::Client, plan: &Plan, auth: &Auth) -> Resul
 }
 
 async fn run(cli: Cli) -> Result<(), String> {
-    // clap forbids combining the flags; dry-run is the default either way.
-    let apply = cli.apply && !cli.dry_run;
-    let mode = if apply { Mode::Apply } else { Mode::DryRun };
     let password =
         generate_password(PASSWORD_LEN).map_err(|e| format!("entropy source failed: {e}"))?;
+    let plan = build_plan(&cli, &password);
 
-    if !apply {
-        let plan = build_plan(&cli.api_url, &cli.device_id, cli.role, &password, mode);
+    if plan.mode == Mode::DryRun {
         let json = serde_json::to_string_pretty(&plan).map_err(|e| e.to_string())?;
         println!("{json}");
         return Ok(());
     }
 
     let auth = resolve_auth();
-    let plan = build_plan(&cli.api_url, &cli.device_id, cli.role, &password, mode);
     println!("mqtt_username={}", plan.mqtt_username);
     println!("mqtt_password={password}");
     let client = reqwest::Client::builder()
@@ -402,14 +408,21 @@ mod tests {
         assert_eq!(arr[0]["rules"].as_array().expect("rules").len(), 4);
     }
 
+    fn cli(device_id: &str, role: Role, apply: bool) -> Cli {
+        Cli {
+            device_id: device_id.to_owned(),
+            role,
+            dry_run: false,
+            apply,
+            api_url: "http://localhost:18083/".to_owned(),
+        }
+    }
+
     #[test]
     fn dry_run_plan_json_parses_and_round_trips() {
         let plan = build_plan(
-            "http://localhost:18083/",
-            "gate-9",
-            Role::Gate,
+            &cli("gate-9", Role::Gate, false),
             "Abcdefghijklmnopqrstuvwxyz012345",
-            Mode::DryRun,
         );
         let json = serde_json::to_string(&plan).expect("serializable");
         let back: Plan = serde_json::from_str(&json).expect("parses");
@@ -423,5 +436,20 @@ mod tests {
         let v1: serde_json::Value = serde_json::from_str(&json).expect("value");
         let v2: serde_json::Value = serde_json::from_str(&v1.to_string()).expect("value round 2");
         assert_eq!(v1, v2);
+    }
+
+    #[test]
+    fn apply_flag_selects_apply_mode_otherwise_dry_run() {
+        assert_eq!(
+            build_plan(&cli("d", Role::Gate, true), "pw").mode,
+            Mode::Apply
+        );
+        assert_eq!(
+            build_plan(&cli("d", Role::Gate, false), "pw").mode,
+            Mode::DryRun
+        );
+        let mut conflicting = cli("d", Role::Gate, true);
+        conflicting.dry_run = true; // clap forbids this; builder still fails safe to dry-run
+        assert_eq!(build_plan(&conflicting, "pw").mode, Mode::DryRun);
     }
 }

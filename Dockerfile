@@ -5,6 +5,7 @@ RUN apk add --no-cache musl-dev sqlite-dev pkgconf
 # Prepare a dummy main to cache dependencies
 COPY Cargo.toml Cargo.lock ./
 COPY src/ ./src/
+COPY schema.sql ./
 RUN cargo build --release
 
 FROM alpine:3.21

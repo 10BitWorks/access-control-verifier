@@ -358,7 +358,140 @@ impl Store {
         rows.collect()
     }
 
+    pub fn device_role(&self, device_id: &str) -> rusqlite::Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT role FROM devices WHERE device_id = ?1",
+                params![device_id],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    /// Create a single-use provisioning job; returns the generated job id.
+    pub fn create_job(
+        &mut self,
+        uid: &str,
+        member_key: &str,
+        device_id: &str,
+        created_at: &str,
+        expires_at: &str,
+    ) -> rusqlite::Result<String> {
+        let job_id: String =
+            self.conn
+                .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+        self.conn.execute(
+            "INSERT INTO jobs (job_id, uid, member_key, device_id, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![job_id, uid, member_key, device_id, created_at, expires_at],
+        )?;
+        Ok(job_id)
+    }
+
+    /// Atomically claim a job for consumption. Single-use: the `consumed_at`
+    /// transition happens under an IMMEDIATE transaction so a concurrent
+    /// second claim observes `AlreadyConsumed`.
+    pub fn take_job(&mut self, job_id: &str, now: &str) -> rusqlite::Result<JobTake> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let row: Option<(String, String, String, String, Option<String>)> = tx
+            .query_row(
+                "SELECT uid, member_key, device_id, expires_at, consumed_at
+                 FROM jobs WHERE job_id = ?1",
+                params![job_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((uid, member_key, device_id, expires_at, consumed_at)) = row else {
+            return Ok(JobTake::NotFound);
+        };
+        let job = JobRow {
+            job_id: job_id.to_string(),
+            uid,
+            member_key,
+            device_id,
+            expires_at: expires_at.clone(),
+            consumed_at,
+        };
+        if job.consumed_at.is_some() {
+            return Ok(JobTake::AlreadyConsumed(job));
+        }
+        let expired = match chrono::DateTime::parse_from_rfc3339(&expires_at) {
+            Ok(dt) => {
+                let now_dt = chrono::DateTime::parse_from_rfc3339(now)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now());
+                dt.with_timezone(&chrono::Utc) <= now_dt
+            }
+            // Unparseable expiry is treated as expired (fail-safe: no redelivery).
+            Err(_) => true,
+        };
+        if expired {
+            return Ok(JobTake::Expired(job));
+        }
+        let changed = tx.execute(
+            "UPDATE jobs SET consumed_at = ?1 WHERE job_id = ?2 AND consumed_at IS NULL",
+            params![now, job_id],
+        )?;
+        if changed == 0 {
+            return Ok(JobTake::AlreadyConsumed(job));
+        }
+        tx.commit()?;
+        Ok(JobTake::Taken(job))
+    }
+
+    /// Enroll (or re-provision) a tag, setting `last_counter` from the card's
+    /// current counter as reported by the writer.
+    pub fn enroll_job_tag(
+        &mut self,
+        uid: &str,
+        member_key: &str,
+        key_version: i64,
+        last_counter: i64,
+        timestamp: &str,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO tags (uid, member_key, key_version, last_counter, status, enrolled_at)
+             VALUES (?1, ?2, ?3, ?4, 'active', ?5)
+             ON CONFLICT(uid) DO UPDATE SET
+             member_key = excluded.member_key,
+             key_version = excluded.key_version,
+             last_counter = excluded.last_counter,
+             status = 'active',
+             enrolled_at = excluded.enrolled_at",
+            params![uid, member_key, key_version, last_counter, timestamp],
+        )?;
+        Ok(())
+    }
+
     pub fn conn_mut(&mut self) -> &mut Connection {
         &mut self.conn
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct JobRow {
+    pub job_id: String,
+    pub uid: String,
+    pub member_key: String,
+    pub device_id: String,
+    pub expires_at: String,
+    pub consumed_at: Option<String>,
+}
+
+#[derive(Debug)]
+pub enum JobTake {
+    Taken(JobRow),
+    AlreadyConsumed(JobRow),
+    Expired(JobRow),
+    NotFound,
 }

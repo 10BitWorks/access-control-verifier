@@ -5,7 +5,7 @@ services:
     container_name: access-control-verifier
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "8001:8000"
     env_file:
       - .env
     volumes:

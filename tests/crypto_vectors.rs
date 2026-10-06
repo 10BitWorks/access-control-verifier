@@ -1,7 +1,7 @@
 #[path = "../src/crypto.rs"]
 mod crypto;
 
-use crypto::{aes_cmac, cmac_for, diversify, verify_sun, Key, TapCounter, Uid};
+use crypto::{aes_cmac, cmac_for, diversify, verify_sun, Key, SunCmac, SunError, TapCounter, Uid};
 
 #[test]
 fn test_rfc4493_aes_cmac_vectors() {
@@ -70,6 +70,80 @@ fn test_golden_vectors_from_script() {
     assert!(verify_sun(&uid1, &counter1, &cmac1, &tag_key1).is_ok());
 }
 
+#[test]
+fn test_wire_constructors() {
+    assert_eq!(
+        Uid::from_hex("046522cabc5d8").unwrap_err(),
+        SunError::BadUid
+    );
+    assert_eq!(
+        Uid::from_hex("046522cabc5d800").unwrap_err(),
+        SunError::BadUid
+    );
+    assert_eq!(
+        Uid::from_hex("invalidhexstrg").unwrap_err(),
+        SunError::BadUid
+    );
+    assert!(Uid::from_hex("046522cabc5d80").is_ok());
+
+    assert_eq!(
+        TapCounter::from_hex("00000").unwrap_err(),
+        SunError::BadCounter
+    );
+    assert_eq!(
+        TapCounter::from_hex("0000001").unwrap_err(),
+        SunError::BadCounter
+    );
+    assert_eq!(
+        TapCounter::from_hex("nothex").unwrap_err(),
+        SunError::BadCounter
+    );
+    assert!(TapCounter::from_hex("000001").is_ok());
+
+    assert_eq!(
+        SunCmac::from_hex("6B1002C48D3F8A7B190B44897CDD70B").unwrap_err(),
+        SunError::BadCmac
+    );
+    assert_eq!(
+        SunCmac::from_hex("6B1002C48D3F8A7B190B44897CDD70BFF").unwrap_err(),
+        SunError::BadCmac
+    );
+    assert_eq!(
+        SunCmac::from_hex("invalidhexinvalidhexinvalidhexin").unwrap_err(),
+        SunError::BadCmac
+    );
+    assert!(SunCmac::from_hex("6B1002C48D3F8A7B190B44897CDD70BF").is_ok());
+}
+
+#[test]
+fn test_truncation_constant() {
+    let master = Key::from_hex("000102030405060708090a0b0c0d0e0f").unwrap();
+    let uid1 = Uid::from_hex("046522cabc5d80").unwrap();
+    let counter1 = TapCounter::from_hex("000001").unwrap();
+    let tag_key1 = diversify(&master, &uid1);
+
+    // Compute original 16-byte CMAC
+    let cmac1 = cmac_for(&master, &uid1, &counter1);
+
+    // Copy the correct 16 bytes into an array
+    let mut modified_cmac_bytes = cmac1.0;
+
+    // Modify bytes beyond the SUN_CMAC_COMPARE_BYTES index
+    #[allow(clippy::needless_range_loop)]
+    for i in 0..16 {
+        if i >= crypto::SUN_CMAC_COMPARE_BYTES {
+            modified_cmac_bytes[i] ^= 0xFF; // Invert to guarantee mismatch if checked
+        }
+    }
+
+    // If SUN_CMAC_COMPARE_BYTES is 16, the loop won't execute, so we need to ensure the test asserts
+    // the current logic. If it is 16, modifying won't happen, so we assert true anyway.
+    // If it is smaller, modifying happens and it should STILL assert true because verify_sun only compares the prefix.
+    let modified_cmac = SunCmac(modified_cmac_bytes);
+
+    // Should still pass because verify_sun only compares the first SUN_CMAC_COMPARE_BYTES
+    assert!(verify_sun(&uid1, &counter1, &modified_cmac, &tag_key1).is_ok());
+}
 #[test]
 fn test_tap_counter_conversion() {
     let c = TapCounter::from_u32(1);

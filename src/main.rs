@@ -2,7 +2,7 @@ use access_control_verifier::api::{AppState, NoopSink};
 use access_control_verifier::app;
 use access_control_verifier::crypto::Key;
 use access_control_verifier::store::Store;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::env;
 use std::process;
 use std::sync::{Arc, Mutex};
@@ -14,7 +14,7 @@ struct Args {
     cmd: Option<Command>,
 }
 
-#[derive(Parser, Debug)]
+#[derive(Subcommand, Debug)]
 enum Command {
     Healthcheck,
 }

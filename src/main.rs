@@ -56,20 +56,34 @@ async fn main() -> anyhow::Result<()> {
         process::exit(1);
     });
 
+    let master = Key::from_hex(&master_key_hex).unwrap_or_else(|_| {
+        eprintln!("Invalid MASTER_KEY hex");
+        process::exit(1);
+    });
+
     let db_path = env::var("DB_PATH").unwrap_or_else(|_| "access.db".to_string());
     let store = Store::open(&db_path).unwrap_or_else(|e| {
         eprintln!("Failed to open database {}: {}", db_path, e);
         process::exit(1);
     });
 
+    let store_arc = Arc::new(Mutex::new(store));
+
+    let sink: Arc<dyn access_control_verifier::api::DecisionSink> = if env::var("MQTT_HOST").is_ok()
+    {
+        let mqtt_cfg = access_control_verifier::mqtt::MqttConfig::from_env();
+        let spawned =
+            access_control_verifier::mqtt::spawn(&mqtt_cfg, Arc::clone(&store_arc), master.clone());
+        Arc::new(spawned.sink)
+    } else {
+        Arc::new(NoopSink)
+    };
+
     let state = AppState {
-        store: Arc::new(Mutex::new(store)),
-        master: Key::from_hex(&master_key_hex).unwrap_or_else(|_| {
-            eprintln!("Invalid MASTER_KEY hex");
-            process::exit(1);
-        }),
+        store: store_arc,
+        master,
         secret: env::var("EMQX_SHARED_SECRET").unwrap_or_default(),
-        sink: Arc::new(NoopSink), // To be replaced when MQTT is hooked up
+        sink,
     };
 
     let bind_addr = env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8000".to_string());

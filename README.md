@@ -11,7 +11,7 @@ flowchart TD
     EMQX -->|Webhook| Verifier[access-control-verifier]
     
     subgraph access-control-verifier
-        Auth[/v1/auth] --> MAC[SUN CMAC Verification]
+        Auth["/v1/auth"] --> MAC[SUN CMAC Verification]
         MAC --> Cache[(SQLite Offline Cache)]
         Sync[Authentik Sync Worker] <--> Cache
     end

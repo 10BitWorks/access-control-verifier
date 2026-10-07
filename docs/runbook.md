@@ -1,5 +1,24 @@
 # Operations Runbook
 
+## EMQX Configuration
+
+### Rule Engine & HTTP Connector
+
+1.  Open the EMQX Dashboard.
+2.  Navigate to **Integration** -> **Connectors**.
+3.  Create a new HTTP Connector:
+    *   **Name:** `access_verifier`
+    *   **Base URL:** `http://access-control-verifier:3000`
+    *   **Method:** `POST`
+    *   **Headers:** `Content-Type: application/json`
+4.  Navigate to **Integration** -> **Rules**.
+5.  Create a new Rule:
+    *   **Name:** `door_taps`
+    *   **SQL:** `SELECT * FROM "door/+/tap"`
+    *   **Action:** Select the `access_verifier` HTTP Connector created above.
+    *   **Path:** `/v1/auth`
+    *   **Body:** `${payload}`
+
 ## EMQX device onboarding
 
 Onboard one MQTT device (door reader or card writer) by creating its broker
@@ -85,3 +104,44 @@ Notes:
   user/topic (edit instead of re-adding on re-onboarding).
 - API keys are managed under **Dashboard → API Key Management**; store
   `EMQX_API_KEY`/`EMQX_API_SECRET` in the environment only, never in git.
+
+## Key Management
+
+### Generating a Master Key
+
+Generate a secure 16-byte hex string:
+
+```bash
+openssl rand -hex 16
+```
+
+### Key Rotation
+
+Update `MASTER_KEY_HEX` in the `.env` file and increment `key_version`.
+
+## Backup and Restore
+
+### Backup
+
+```bash
+sqlite3 data/access.db ".backup 'data/backup-$(date +%Y%m%d).db'"
+```
+
+### Restore
+
+```bash
+cp data/access.db data/access.db.bak
+cp data/backup-YYYYMMDD.db data/access.db
+```
+
+## Monitoring
+
+Register the verifier in Uptime Kuma to monitor the health endpoint: `GET /healthz`.
+
+## Relocation Checklist
+
+The service is fully containerized. Moving to a new location requires:
+
+1.  Deploying the `compose.yaml` stack.
+2.  Updating the MQTT broker DNS/IP in the environment.
+3.  Re-establishing Tailscale/LAN connectivity.

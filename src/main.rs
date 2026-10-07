@@ -68,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("Invalid MASTER_KEY hex");
             process::exit(1);
         }),
-        secret: env::var("EMQX_SECRET").unwrap_or_default(),
+        secret: env::var("EMQX_SHARED_SECRET").unwrap_or_default(),
         sink: Arc::new(NoopSink), // To be replaced when MQTT is hooked up
     };
 

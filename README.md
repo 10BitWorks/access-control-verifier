@@ -33,10 +33,17 @@ flowchart TD
 Create a `.env` file (see `.env.example`):
 
 ```env
-DATABASE_URL=sqlite://data/access.db
-MASTER_KEY_HEX=...
-MQTT_BROKER_URL=mqtt://...
-AUTHENTIK_API_TOKEN=...
+# See `.env.example` for the full, authoritative list.
+BIND=0.0.0.0:8000
+MASTER_KEY=...                 # 32-byte hex master key
+EMQX_SHARED_SECRET=...         # must match the EMQX connector's `x-emqx-secret` header
+MQTT_HOST=...                  # EMQX broker host (TLS 8883 by default)
+MQTT_PORT=8883
+MQTT_TLS=true
+MQTT_USERNAME=...
+MQTT_PASSWORD=...
+AUTHENTIK_URL=https://auth.example.com
+AUTHENTIK_TOKEN=...
 ```
 
 ### Running via Docker Compose

@@ -4,20 +4,39 @@
 
 ### Rule Engine & HTTP Connector
 
+Readers publish SUN auth tuples over MQTT; the verifier receives them over HTTP
+via an EMQX rule + connector (the verifier itself only **subscribes** to
+`access/+/presence` and **publishes** decisions/ACLs — it does not subscribe to
+auth topics).
+
 1.  Open the EMQX Dashboard.
 2.  Navigate to **Integration** -> **Connectors**.
 3.  Create a new HTTP Connector:
     *   **Name:** `access_verifier`
-    *   **Base URL:** `http://access-control-verifier:3000`
+    *   **Base URL:** `http://access-control-verifier:8000` (the service binds
+        `:8000`; `compose.yaml` maps host `:8001` -> container `:8000`)
     *   **Method:** `POST`
-    *   **Headers:** `Content-Type: application/json`
+    *   **Headers:**
+        *   `Content-Type: application/json`
+        *   `x-emqx-secret: <EMQX_SHARED_SECRET>` — **required**; the verifier
+            returns `401` for any request whose `x-emqx-secret` does not equal
+            its configured `EMQX_SHARED_SECRET`
 4.  Navigate to **Integration** -> **Rules**.
 5.  Create a new Rule:
-    *   **Name:** `door_taps`
-    *   **SQL:** `SELECT * FROM "door/+/tap"`
+    *   **Name:** `gate_auth`
+    *   **SQL:** `SELECT * FROM "access/+/auth"`
     *   **Action:** Select the `access_verifier` HTTP Connector created above.
     *   **Path:** `/v1/auth`
     *   **Body:** `${payload}`
+
+> **Topic:** readers publish to `access/<id>/auth`, so the rule **must** match
+> `access/+/auth`. Earlier revisions of this runbook used `door/+/tap`, which no
+> component publishes — a rule on that topic silently receives nothing.
+>
+> **Payload:** the rule forwards the raw JSON body unchanged. The verifier
+> deserializes exactly `{"reader","uid","counter","cmac"}` with
+> `deny_unknown_fields`, so all four keys must be present and no extra keys may
+> be added.
 
 ## EMQX device onboarding
 
@@ -117,7 +136,8 @@ openssl rand -hex 16
 
 ### Key Rotation
 
-Update `MASTER_KEY_HEX` in the `.env` file and increment `key_version`.
+Update `MASTER_KEY` in the `.env` file (`main.rs` reads the env var `MASTER_KEY`)
+and increment `key_version`.
 
 ## Backup and Restore
 

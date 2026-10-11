@@ -21,6 +21,16 @@ auth topics).
         *   `x-emqx-secret: <EMQX_SHARED_SECRET>` — **required**; the verifier
             returns `401` for any request whose `x-emqx-secret` does not equal
             its configured `EMQX_SHARED_SECRET`
+
+    > **Cross-host deployments (current production topology):** when EMQX and
+    > the verifier run on different hosts (broker LXC vs the docker LXC), the
+    > container hostname does not resolve from the broker — the rule fires but
+    > every HTTP request fails silently. Put the full routable URL, path
+    > included, in the connector instead:
+    > `http://<verifier-host>:8001/v1/auth` (deployed:
+    > `http://10.7.1.25:8001/v1/auth`, connector name `verifier`) and omit the
+    > `Path` on the rule action.
+
 4.  Navigate to **Integration** -> **Rules**.
 5.  Create a new Rule:
     *   **Name:** `gate_auth`
@@ -37,6 +47,15 @@ auth topics).
 > deserializes exactly `{"reader","uid","counter","cmac"}` with
 > `deny_unknown_fields`, so all four keys must be present and no extra keys may
 > be added.
+>
+> **Deployed rule variant (verified 2026-10-11):** the production rule (name
+> `verifier`) instead maps the reader from the MQTT client id —
+> `SELECT clientid as reader, payload.uid as uid, payload.counter as counter,
+> payload.cmac as cmac FROM "access/+/auth"` — so each device's MQTT client id
+> MUST equal its device id. Verify over SSH with `emqx ctl rules list` /
+> `emqx ctl rules show <id>`; trace rule execution with
+> `emqx ctl trace start ruleid <id> <file>`. Note: EMQX's default ACL denies
+> subscribing to exactly `#` — always test with specific topic filters.
 
 ## EMQX device onboarding
 

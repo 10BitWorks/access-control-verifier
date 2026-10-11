@@ -177,7 +177,7 @@ async fn job_lifecycle_create_deliver_consume() {
     assert_eq!(delivered["job_id"], job_id);
     assert!(!delivered["expires_at"].as_str().unwrap().is_empty());
     assert_eq!(delivered["sun_config"]["key_version"], 1);
-    assert_eq!(delivered["sun_config"]["cmac_bytes"], 16);
+    assert_eq!(delivered["sun_config"]["cmac_bytes"], 8);
 
     // Per-tag key only; master key never in any payload.
     let uid = Uid::from_hex(UID_NEW).expect("uid");

@@ -1,4 +1,5 @@
 use access_control_verifier::crypto::{diversify, Key, Uid};
+use access_control_verifier::mqtt::claim_and_build;
 use access_control_verifier::store::Store;
 use access_control_verifier::writer::{router, JobPublisher, WriterState, MAX_TTL_SECS};
 use axum::{
@@ -353,4 +354,78 @@ async fn counter_out_of_range_rejected() {
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn wildcard_create_arms_without_key() {
+    let f = build();
+    let body = json!({ "member_key": MEMBER, "device_id": DEVICE_WRITER });
+    let (status, created) = post(&f.app, "/v1/jobs", Some(ADMIN_TOKEN), body).await;
+    assert_eq!(status, StatusCode::CREATED, "body: {created}");
+    let job_id = created["job_id"].as_str().expect("job_id").to_string();
+
+    // Exactly one delivery, to the writer, carrying the arming payload only.
+    assert_eq!(f.pubq.len(), 1);
+    let (device_id, payload) = f.pubq.last().expect("one delivery");
+    assert_eq!(device_id, DEVICE_WRITER);
+
+    let delivered: Value = serde_json::from_str(&payload).expect("payload is JSON");
+    assert_eq!(delivered["uid"], "");
+    assert_eq!(delivered["key"], "");
+    assert_eq!(delivered["job_id"], job_id);
+    assert_eq!(delivered["sun_config"]["key_version"], 1);
+    assert_eq!(delivered["sun_config"]["cmac_bytes"], 8);
+    assert!(
+        !payload.contains(MASTER_HEX),
+        "master key leaked in payload"
+    );
+}
+
+#[test]
+fn wildcard_claim_binds_uid_and_builds_keyed_payload() {
+    let f = build();
+    let now = chrono::Utc::now().to_rfc3339();
+    let expires = (chrono::Utc::now() + chrono::Duration::seconds(60)).to_rfc3339();
+    let job_id = {
+        let mut store = f.store.lock().expect("store lock");
+        store
+            .create_job("", MEMBER, DEVICE_WRITER, &now, &expires)
+            .expect("create wildcard job")
+    };
+
+    let master = Key::from_hex(MASTER_HEX).expect("master key hex");
+
+    // First claim binds the uid and yields the keyed payload on the job topic.
+    let (topic, payload) =
+        claim_and_build(&f.store, &master, DEVICE_WRITER, &job_id, UID_NEW, &now)
+            .expect("claim granted");
+    assert_eq!(topic, format!("writer/{DEVICE_WRITER}/job"));
+
+    let delivered: Value = serde_json::from_str(&payload).expect("payload is JSON");
+    assert_eq!(delivered["uid"], UID_NEW.to_ascii_lowercase());
+    assert_eq!(delivered["job_id"], job_id);
+    let uid = Uid::from_hex(UID_NEW).expect("uid");
+    let expected_key = hex::encode(diversify(&master, &uid).0);
+    assert_eq!(delivered["key"], expected_key);
+    assert!(
+        !payload.contains(MASTER_HEX),
+        "master key leaked in payload"
+    );
+
+    // A second claim from a different tag is refused.
+    assert!(
+        claim_and_build(
+            &f.store,
+            &master,
+            DEVICE_WRITER,
+            &job_id,
+            "0405060708090a",
+            &now
+        )
+        .is_none(),
+        "second tag must not claim a bound job"
+    );
+
+    // A malformed uid is refused without mutating the job.
+    assert!(claim_and_build(&f.store, &master, DEVICE_WRITER, &job_id, "zz", &now).is_none());
 }

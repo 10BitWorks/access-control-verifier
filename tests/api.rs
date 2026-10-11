@@ -132,7 +132,7 @@ fn build(sink: Arc<dyn DecisionSink>) -> (axum::Router, Arc<Mutex<Store>>, Named
         secret: SECRET.to_string(),
         sink,
     };
-    (access_control_verifier::app(state), store, db)
+    (access_control_verifier::app(state, None), store, db)
 }
 
 fn setup() -> Fixture {
@@ -516,7 +516,7 @@ async fn noop_sink_serves_requests_without_capture() {
         secret: SECRET.to_string(),
         sink: Arc::new(NoopSink),
     };
-    let app = access_control_verifier::app(state);
+    let app = access_control_verifier::app(state, None);
 
     let master = Key::from_hex(MASTER_HEX).expect("master key hex");
     let uid = Uid::from_hex(UID_ACTIVE).expect("uid hex");

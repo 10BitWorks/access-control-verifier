@@ -10,7 +10,8 @@
 
 use crate::api::{DecisionSink, PULSE_MS};
 use crate::crypto::{diversify, Key, Uid};
-use crate::store::Store;
+use crate::store::{JobClaim, Store};
+use crate::writer::{consume_job, job_payload, ConsumeOutcome};
 use chrono::{DateTime, Utc};
 use rumqttc::{AsyncClient, Event, EventLoop, Incoming, MqttOptions, QoS, Transport};
 use serde_json::{json, Value};
@@ -18,6 +19,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 
 const PRESENCE_FILTER: &str = "access/+/presence";
+const WRITER_CLAIM_FILTER: &str = "writer/+/claim";
+const WRITER_DONE_FILTER: &str = "writer/+/done";
+const MAX_COUNTER: u64 = 0xFF_FFFF;
 const CHANNEL_CAP: usize = 64;
 const RECONNECT_DELAY: StdDuration = StdDuration::from_secs(1);
 const KEEP_ALIVE: StdDuration = StdDuration::from_secs(30);
@@ -101,6 +105,8 @@ impl DecisionSink for MqttSink {
 
 pub struct Spawned {
     pub sink: MqttSink,
+    /// Shared client, exposed so a job publisher can reuse the same connection.
+    pub client: AsyncClient,
     pub presence_task: tokio::task::JoinHandle<()>,
     pub acl_task: tokio::task::JoinHandle<()>,
 }
@@ -114,10 +120,12 @@ pub fn spawn(cfg: &MqttConfig, store: Arc<Mutex<Store>>, master: Key) -> Spawned
         eventloop,
         client.clone(),
         Arc::clone(&store),
+        master.clone(),
     ));
-    let acl_task = tokio::spawn(acl_push_loop(client, store, master));
+    let acl_task = tokio::spawn(acl_push_loop(client.clone(), store, master));
     Spawned {
         sink,
+        client,
         presence_task,
         acl_task,
     }
@@ -127,23 +135,159 @@ pub async fn run_event_loop(
     mut eventloop: EventLoop,
     client: AsyncClient,
     store: Arc<Mutex<Store>>,
+    master: Key,
 ) {
     loop {
         match eventloop.poll().await {
             Ok(Event::Incoming(Incoming::ConnAck(_))) => {
-                if let Err(e) = client.subscribe(PRESENCE_FILTER, QoS::AtLeastOnce).await {
-                    tracing::warn!(error = %e, "presence subscribe failed");
+                for filter in [PRESENCE_FILTER, WRITER_CLAIM_FILTER, WRITER_DONE_FILTER] {
+                    if let Err(e) = client.subscribe(filter, QoS::AtLeastOnce).await {
+                        tracing::warn!(error = %e, filter, "subscribe failed");
+                    }
                 }
             }
             Ok(Event::Incoming(Incoming::Publish(publish))) => {
                 if let Some(device) = presence_device(&publish.topic) {
                     handle_presence(&store, device, &publish.payload);
+                } else if let Some((device, event)) = writer_event_topic(&publish.topic) {
+                    handle_writer(&client, &store, &master, device, event, &publish.payload).await;
                 }
             }
             Ok(_) => {}
             Err(e) => {
                 tracing::warn!(error = %e, "mqtt connection error; reconnecting");
                 tokio::time::sleep(RECONNECT_DELAY).await;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriterEvent {
+    Claim,
+    Done,
+}
+
+fn writer_event_topic(topic: &str) -> Option<(&str, WriterEvent)> {
+    let rest = topic.strip_prefix("writer/")?;
+    let (device, kind) = rest.rsplit_once('/')?;
+    if device.is_empty() || device.contains('/') {
+        return None;
+    }
+    let event = match kind {
+        "claim" => WriterEvent::Claim,
+        "done" => WriterEvent::Done,
+        _ => return None,
+    };
+    Some((device, event))
+}
+
+/// Bind a wildcard job's uid on first claim and build the keyed delivery
+/// payload. Returns `(topic, payload)` only when the claim is granted.
+pub fn claim_and_build(
+    store: &Arc<Mutex<Store>>,
+    master: &Key,
+    device: &str,
+    job_id: &str,
+    uid_hex: &str,
+    now: &str,
+) -> Option<(String, String)> {
+    let uid = match Uid::from_hex(uid_hex) {
+        Ok(u) => u,
+        Err(_) => {
+            tracing::warn!(device, uid_hex, "claim with invalid uid");
+            return None;
+        }
+    };
+    let mut store = match store.lock() {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
+    match store.claim_job(job_id, uid_hex, now) {
+        Ok(JobClaim::Claimed(job)) => {
+            let key_hex = hex::encode(diversify(master, &uid).0);
+            let payload = job_payload(&job.uid, &key_hex, &job.job_id, &job.expires_at);
+            Some((format!("writer/{device}/job"), payload))
+        }
+        Ok(other) => {
+            tracing::debug!(device, job_id, ?other, "claim not granted");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, device, job_id, "claim_job failed");
+            None
+        }
+    }
+}
+
+async fn handle_writer(
+    client: &AsyncClient,
+    store: &Arc<Mutex<Store>>,
+    master: &Key,
+    device: &str,
+    event: WriterEvent,
+    payload: &[u8],
+) {
+    let value: Value = match serde_json::from_slice(payload) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, device, "malformed writer payload");
+            return;
+        }
+    };
+    let Some(job_id) = value.get("job_id").and_then(|j| j.as_str()) else {
+        tracing::warn!(device, "writer payload missing job_id");
+        return;
+    };
+    let now = Utc::now().to_rfc3339();
+    match event {
+        WriterEvent::Claim => {
+            let Some(uid_hex) = value
+                .get("uid")
+                .and_then(|u| u.as_str())
+                .map(|s| s.to_ascii_lowercase())
+            else {
+                tracing::warn!(device, job_id, "claim payload missing uid");
+                return;
+            };
+            let Some((topic, body)) =
+                claim_and_build(store, master, device, job_id, &uid_hex, &now)
+            else {
+                return;
+            };
+            if let Err(e) = client.publish(topic, QoS::AtLeastOnce, false, body).await {
+                tracing::warn!(error = %e, device, job_id, "keyed job publish dropped");
+            }
+        }
+        WriterEvent::Done => {
+            let ok = value.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
+            if !ok {
+                let reason = value
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("provision_failed");
+                if let Ok(mut store) = store.lock() {
+                    if let Err(e) = store.fail_job(job_id, &now, reason) {
+                        tracing::warn!(error = %e, device, job_id, "fail_job failed");
+                    }
+                }
+                return;
+            }
+            let counter = value.get("counter").and_then(|c| c.as_u64()).unwrap_or(0);
+            if counter > MAX_COUNTER {
+                tracing::warn!(device, job_id, counter, "done counter out of range");
+                return;
+            }
+            let outcome = store
+                .lock()
+                .ok()
+                .map(|mut s| consume_job(&mut s, job_id, counter as i64, &now, Some(device)));
+            match outcome {
+                Some(ConsumeOutcome::Enrolled { uid, .. }) => {
+                    tracing::info!(device, job_id, uid, counter, "job enrolled via mqtt")
+                }
+                Some(other) => tracing::debug!(device, job_id, ?other, "mqtt done not enrolled"),
+                None => tracing::warn!(device, job_id, "store lock poisoned on done"),
             }
         }
     }

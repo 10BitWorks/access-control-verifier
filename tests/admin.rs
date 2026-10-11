@@ -208,3 +208,67 @@ async fn admin_flow_overrides_and_devices() {
     assert_eq!(devices[0]["device_id"], "front_door");
     assert_eq!(devices[0]["offline_verify"], true);
 }
+
+#[tokio::test]
+async fn admin_set_device_role() {
+    let f = setup();
+
+    // Provision a reader.
+    let (status, _) = post(
+        &f.app,
+        "/admin/api/devices",
+        Some("test-token"),
+        json!({ "device_id": "reader-01", "role": "gate", "offline_verify": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Promote it to a writer/reader.
+    let (status, body) = post(
+        &f.app,
+        "/admin/api/devices/reader-01/role",
+        Some("test-token"),
+        json!({ "role": "both" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let (_, body) = get(&f.app, "/admin/api/devices", Some("test-token")).await;
+    let reader = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["device_id"] == "reader-01")
+        .expect("reader present");
+    assert_eq!(reader["role"], "both");
+
+    // Invalid role is rejected.
+    let (status, _) = post(
+        &f.app,
+        "/admin/api/devices/reader-01/role",
+        Some("test-token"),
+        json!({ "role": "admin" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Unknown device is rejected.
+    let (status, _) = post(
+        &f.app,
+        "/admin/api/devices/ghost/role",
+        Some("test-token"),
+        json!({ "role": "writer" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Unauthenticated is rejected.
+    let (status, _) = post(
+        &f.app,
+        "/admin/api/devices/reader-01/role",
+        None,
+        json!({ "role": "writer" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}

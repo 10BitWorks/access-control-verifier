@@ -368,6 +368,19 @@ impl Store {
             .optional()
     }
 
+    /// Set a device's role. Roles outside `{gate, writer, both}` are rejected
+    /// (`Ok(false)`); returns `false` also when the device is unknown.
+    pub fn set_device_role(&mut self, device_id: &str, role: &str) -> rusqlite::Result<bool> {
+        if !matches!(role, "gate" | "writer" | "both") {
+            return Ok(false);
+        }
+        let changed = self.conn.execute(
+            "UPDATE devices SET role = ?1 WHERE device_id = ?2",
+            params![role, device_id],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// Create a single-use provisioning job; returns the generated job id.
     pub fn create_job(
         &mut self,
@@ -425,17 +438,7 @@ impl Store {
         if job.consumed_at.is_some() {
             return Ok(JobTake::AlreadyConsumed(job));
         }
-        let expired = match chrono::DateTime::parse_from_rfc3339(&expires_at) {
-            Ok(dt) => {
-                let now_dt = chrono::DateTime::parse_from_rfc3339(now)
-                    .map(|d| d.with_timezone(&chrono::Utc))
-                    .unwrap_or_else(|_| chrono::Utc::now());
-                dt.with_timezone(&chrono::Utc) <= now_dt
-            }
-            // Unparseable expiry is treated as expired (fail-safe: no redelivery).
-            Err(_) => true,
-        };
-        if expired {
+        if job_expired(&expires_at, now) {
             return Ok(JobTake::Expired(job));
         }
         let changed = tx.execute(
@@ -447,6 +450,100 @@ impl Store {
         }
         tx.commit()?;
         Ok(JobTake::Taken(job))
+    }
+
+    /// Claim a job for a specific tag id. A wildcard job (empty `uid`) binds
+    /// its uid on first claim; a fixed-uid job never changes its uid. Single-use
+    /// semantics mirror `take_job`; the uid transition commits under an
+    /// IMMEDIATE transaction so a concurrent claim observes the bound uid.
+    pub fn claim_job(
+        &mut self,
+        job_id: &str,
+        uid_hex: &str,
+        now: &str,
+    ) -> rusqlite::Result<JobClaim> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let row: Option<(String, String, String, String, Option<String>)> = tx
+            .query_row(
+                "SELECT uid, member_key, device_id, expires_at, consumed_at
+                 FROM jobs WHERE job_id = ?1",
+                params![job_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((uid, member_key, device_id, expires_at, consumed_at)) = row else {
+            return Ok(JobClaim::NotFound);
+        };
+        let job = JobRow {
+            job_id: job_id.to_string(),
+            uid: uid.clone(),
+            member_key,
+            device_id,
+            expires_at: expires_at.clone(),
+            consumed_at: consumed_at.clone(),
+        };
+        if consumed_at.is_some() {
+            return Ok(JobClaim::Consumed(job));
+        }
+        if job_expired(&expires_at, now) {
+            return Ok(JobClaim::Expired(job));
+        }
+        if uid.is_empty() {
+            tx.execute(
+                "UPDATE jobs SET uid = ?1 WHERE job_id = ?2 AND uid = ''",
+                params![uid_hex, job_id],
+            )?;
+            tx.commit()?;
+            let claimed = JobRow {
+                uid: uid_hex.to_string(),
+                ..job
+            };
+            return Ok(JobClaim::Claimed(claimed));
+        }
+        if uid.eq_ignore_ascii_case(uid_hex) {
+            return Ok(JobClaim::Claimed(job));
+        }
+        Ok(JobClaim::UidMismatch(job))
+    }
+
+    /// Mark a job consumed without enrollment (writer failure or admin cancel).
+    /// Audits `job_failed`. Returns `false` when the job is unknown.
+    pub fn fail_job(&mut self, job_id: &str, now: &str, reason: &str) -> rusqlite::Result<bool> {
+        let row: Option<(String, String, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT device_id, uid, consumed_at FROM jobs WHERE job_id = ?1",
+                params![job_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((device_id, uid, consumed_at)) = row else {
+            return Ok(false);
+        };
+        if consumed_at.is_none() {
+            self.conn.execute(
+                "UPDATE jobs SET consumed_at = ?1 WHERE job_id = ?2 AND consumed_at IS NULL",
+                params![now, job_id],
+            )?;
+        }
+        tracing::info!(job_id, reason, "job failed");
+        let uid_opt = if uid.is_empty() {
+            None
+        } else {
+            Some(uid.as_str())
+        };
+        self.audit_event(now, Some(&device_id), uid_opt, None, "denied", "job_failed")?;
+        Ok(true)
     }
 
     /// Enroll (or re-provision) a tag, setting `last_counter` from the card's
@@ -660,6 +757,31 @@ pub enum JobTake {
     AlreadyConsumed(JobRow),
     Expired(JobRow),
     NotFound,
+}
+
+/// Outcome of `claim_job`. `Claimed` means the caller may deliver the key;
+/// the other variants carry the job row (when it exists) for auditing.
+#[derive(Debug)]
+pub enum JobClaim {
+    Claimed(JobRow),
+    UidMismatch(JobRow),
+    Consumed(JobRow),
+    Expired(JobRow),
+    NotFound,
+}
+
+/// RFC3339 expiry check shared by `take_job` and `claim_job`. An unparseable
+/// expiry is treated as expired (fail-safe: no delivery).
+fn job_expired(expires_at: &str, now: &str) -> bool {
+    match chrono::DateTime::parse_from_rfc3339(expires_at) {
+        Ok(dt) => {
+            let now_dt = chrono::DateTime::parse_from_rfc3339(now)
+                .map(|d| d.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now());
+            dt.with_timezone(&chrono::Utc) <= now_dt
+        }
+        Err(_) => true,
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

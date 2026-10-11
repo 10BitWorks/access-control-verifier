@@ -20,6 +20,7 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/api/tags/{uid}/revoke", post(revoke_tag))
         .route("/admin/api/members", get(list_members))
         .route("/admin/api/devices", get(list_devices).post(upsert_device))
+        .route("/admin/api/devices/{device_id}/role", post(set_device_role))
         .route(
             "/admin/api/overrides",
             get(list_overrides).post(create_override),
@@ -165,6 +166,32 @@ async fn upsert_device(State(state): State<AppState>, Json(req): Json<DeviceUpse
         )
             .into_response(),
     }
+}
+
+async fn set_device_role(
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+    Json(req): Json<RoleSet>,
+) -> Response {
+    let mut store = state.store.lock().expect("store lock poisoned");
+    match store.set_device_role(&device_id, &req.role) {
+        Ok(true) => (StatusCode::OK, Json(json!({"status": "ok"}))).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "unknown device or invalid role"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct RoleSet {
+    role: String,
 }
 
 async fn list_overrides(State(state): State<AppState>) -> Response {

@@ -69,14 +69,26 @@ async fn main() -> anyhow::Result<()> {
 
     let store_arc = Arc::new(Mutex::new(store));
 
-    let sink: Arc<dyn access_control_verifier::api::DecisionSink> = if env::var("MQTT_HOST").is_ok()
-    {
+    let jobs: Arc<dyn access_control_verifier::writer::JobPublisher>;
+    let sink: Arc<dyn access_control_verifier::api::DecisionSink>;
+    if env::var("MQTT_HOST").is_ok() {
         let mqtt_cfg = access_control_verifier::mqtt::MqttConfig::from_env();
         let spawned =
             access_control_verifier::mqtt::spawn(&mqtt_cfg, Arc::clone(&store_arc), master.clone());
-        Arc::new(spawned.sink)
+        jobs = Arc::new(access_control_verifier::writer::MqttJobPublisher::new(
+            spawned.client.clone(),
+        ));
+        sink = Arc::new(spawned.sink);
     } else {
-        Arc::new(NoopSink)
+        jobs = Arc::new(access_control_verifier::writer::NoopJobPublisher);
+        sink = Arc::new(NoopSink);
+    }
+
+    let writer_state = access_control_verifier::writer::WriterState {
+        store: Arc::clone(&store_arc),
+        master: master.clone(),
+        admin_token: env::var("ADMIN_BEARER_TOKEN").unwrap_or_default(),
+        jobs,
     };
 
     let state = AppState {
@@ -88,7 +100,8 @@ async fn main() -> anyhow::Result<()> {
 
     let bind_addr = env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8000".to_string());
 
-    let app = app(state);
+    let writer_router = access_control_verifier::writer::router(writer_state);
+    let app = app(state, Some(writer_router));
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     println!("Listening on {}", bind_addr);
     axum::serve(listener, app).await?;

@@ -3,7 +3,7 @@ pub mod store;
 
 use std::sync::Arc;
 use std::thread;
-use store::{AccessDecision, Store, TapOutcome};
+use store::{AccessDecision, JobClaim, Store, TapOutcome};
 use tempfile::tempdir;
 
 #[test]
@@ -257,4 +257,141 @@ fn test_presence() {
         .unwrap();
     assert_eq!(presence, "online");
     assert_eq!(role, "gate");
+}
+
+#[test]
+fn test_claim_job_wildcard_binds_uid() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let mut store = Store::open(&db_path).unwrap();
+
+    let now = "2026-10-06T10:00:00Z";
+    let expires = "2026-10-06T10:02:00Z";
+    let job_id = store
+        .create_job("", "m1", "writer-01", now, expires)
+        .unwrap();
+
+    // First claim binds the uid.
+    match store.claim_job(&job_id, "04010203040506", now).unwrap() {
+        JobClaim::Claimed(job) => assert_eq!(job.uid, "04010203040506"),
+        other => panic!("expected Claimed, got {other:?}"),
+    }
+
+    // Re-claim with the same uid is idempotent.
+    match store.claim_job(&job_id, "04010203040506", now).unwrap() {
+        JobClaim::Claimed(job) => assert_eq!(job.uid, "04010203040506"),
+        other => panic!("expected Claimed, got {other:?}"),
+    }
+
+    // A different uid is refused once the job is bound.
+    match store.claim_job(&job_id, "0405060708090a", now).unwrap() {
+        JobClaim::UidMismatch(job) => assert_eq!(job.uid, "04010203040506"),
+        other => panic!("expected UidMismatch, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_claim_job_fixed_uid_and_states() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let mut store = Store::open(&db_path).unwrap();
+
+    let now = "2026-10-06T10:00:00Z";
+    let expires = "2026-10-06T10:02:00Z";
+    let job_id = store
+        .create_job("04010203040506", "m1", "writer-01", now, expires)
+        .unwrap();
+
+    // Wrong uid on a fixed-uid job ⇒ UidMismatch.
+    match store.claim_job(&job_id, "0405060708090a", now).unwrap() {
+        JobClaim::UidMismatch(_) => {}
+        other => panic!("expected UidMismatch, got {other:?}"),
+    }
+
+    // Matching uid ⇒ Claimed.
+    match store.claim_job(&job_id, "04010203040506", now).unwrap() {
+        JobClaim::Claimed(_) => {}
+        other => panic!("expected Claimed, got {other:?}"),
+    }
+
+    // Unknown job.
+    match store
+        .claim_job("00000000000000000000000000000000", "04010203040506", now)
+        .unwrap()
+    {
+        JobClaim::NotFound => {}
+        other => panic!("expected NotFound, got {other:?}"),
+    }
+
+    // Past the TTL ⇒ Expired.
+    match store
+        .claim_job(&job_id, "04010203040506", "2026-10-06T10:05:00Z")
+        .unwrap()
+    {
+        JobClaim::Expired(_) => {}
+        other => panic!("expected Expired, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_fail_job_marks_consumed_and_audits() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let mut store = Store::open(&db_path).unwrap();
+
+    let now = "2026-10-06T10:00:00Z";
+    let expires = "2026-10-06T10:02:00Z";
+    let job_id = store
+        .create_job("04010203040506", "m1", "writer-01", now, expires)
+        .unwrap();
+
+    assert!(store.fail_job(&job_id, now, "provision_failed").unwrap());
+
+    // The failed job is now consumed; a later claim observes Consumed.
+    match store.claim_job(&job_id, "04010203040506", now).unwrap() {
+        JobClaim::Consumed(_) => {}
+        other => panic!("expected Consumed, got {other:?}"),
+    }
+
+    // Unknown job ⇒ false.
+    assert!(!store
+        .fail_job("00000000000000000000000000000000", now, "x")
+        .unwrap());
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let audits: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM audit_log WHERE reason = 'job_failed' AND decision = 'denied'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(audits, 1);
+}
+
+#[test]
+fn test_set_device_role() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let mut store = Store::open(&db_path).unwrap();
+
+    store.upsert_device("reader-01", "gate", false).unwrap();
+    assert_eq!(
+        store.device_role("reader-01").unwrap().as_deref(),
+        Some("gate")
+    );
+
+    assert!(store.set_device_role("reader-01", "both").unwrap());
+    assert_eq!(
+        store.device_role("reader-01").unwrap().as_deref(),
+        Some("both")
+    );
+
+    // Invalid role and unknown device both return false without mutating.
+    assert!(!store.set_device_role("reader-01", "admin").unwrap());
+    assert_eq!(
+        store.device_role("reader-01").unwrap().as_deref(),
+        Some("both")
+    );
+    assert!(!store.set_device_role("ghost", "writer").unwrap());
 }

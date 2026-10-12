@@ -143,6 +143,87 @@ Notes:
 - API keys are managed under **Dashboard → API Key Management**; store
   `EMQX_API_KEY`/`EMQX_API_SECRET` in the environment only, never in git.
 
+## Tag Provisioning (OTA tap-to-enroll)
+
+A blank NTAG 424 DNA is provisioned **on the reader itself**: the admin arms a
+wildcard job, a member taps their blank tag on a writer-role KeyGate node, and
+the node writes the member's diversified key + SUN configuration over the air,
+then reports done. No PC/SC reader, no phone app.
+
+### MQTT contract (writer protocol)
+
+| Topic (writer `{id}` = device id) | Direction | Payload |
+| --- | --- | --- |
+| `writer/{id}/job` | verifier → node | Initial arm: `{"uid":"","key":"","sun_config":{"key_version":1,"cmac_bytes":8},"job_id":"<32hex>","expires_at":"<rfc3339>"}` (wildcard) — or the same with a populated `uid`/`key` for fixed-uid jobs |
+| `writer/{id}/job` | verifier → node | Claim reply for a wildcard tap: `{"uid":"<14hex>","key":"<32hex diversified>","job_id":"<32hex>","expires_at":"…"}` |
+| `writer/{id}/claim` | node → verifier | `{"job_id":"<32hex>","uid":"<14hex>"}` (QoS 1) — sent when a wildcard-armed node sees a tap |
+| `writer/{id}/done` | node → verifier | `{"job_id":"<32hex>","ok":true,"counter":N}` or `{"job_id":"<32hex>","ok":false,"error":"…"}` (QoS 1) |
+
+Notes:
+
+- Jobs are **single-use and short-lived** (TTL ≤ 120 s, server-side) and are
+  never retained on the broker.
+- The node also enforces its own 90 s arm window; a claim that is not answered
+  within 15 s fails the job explicitly. A job whose arm window lapses without a
+  tap is **not** reported — the server-side TTL lapses on its own.
+- The diversified per-tag key (`AES-CMAC(master, 0x01 ‖ uid)`) is the only key
+  material that ever leaves the verifier; the master key does not.
+
+### Device roles
+
+A node only acts on jobs when its device role is `writer` or `both`:
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_BEARER_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"role":"writer"}' \
+     http://<verifier>/admin/api/devices/keygate1/role
+```
+
+### Arming via the admin UI
+
+1. Open `/admin` (Authentik-proxied or bearer token).
+2. **Provisioning (Tap-to-Enroll)** section: pick the writer device and the
+   member, leave *Wildcard* checked, click **Arm writer**.
+3. The panel polls every 2 s: `armed (waiting for tap)` → `tag captured
+   (<uid>)` → gone (enrolled / cancelled / expired).
+4. Tap the blank NTAG 424 on the writer node. The node beeps: three rising
+   tones = armed, ascending triple = provisioned.
+5. The tag is immediately enrolled (`tags` table, active) — a second tap now
+   grants access like any provisioned tag.
+
+Curl equivalent (uses the same admin middleware as `/v1/jobs` on the writer
+API — see below):
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_BEARER_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"member_key":"<member>","device_id":"keygate1","ttl_secs":120}' \
+     http://<verifier>/admin/api/jobs
+```
+
+Track/cancel:
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_BEARER_TOKEN" \
+     http://<verifier>/admin/api/jobs/pending?device=keygate1
+curl -X DELETE -H "Authorization: Bearer $ADMIN_BEARER_TOKEN" \
+     http://<verifier>/admin/api/jobs/<job_id>
+```
+
+The machine-facing `POST /v1/jobs` (bearer `ADMIN_BEARER_TOKEN`) is unchanged
+and still publishes the initial arm payload itself; the admin routes wrap the
+identical store/protocol operations so a proxied browser session can drive
+them.
+
+### Key-0 note
+
+Provisioning authenticates with **factory key 0** (all zeros) and changes only
+application key 1 (the SUN/CMAC key). Key 0 is never modified, so a tag can be
+re-provisioned by arming a new job. The NDEF file is written while it is still
+openly writable, then locked (`write = no access`, `change = key 0`) as part of
+the SDM file settings.
+
 ## Key Management
 
 ### Generating a Master Key

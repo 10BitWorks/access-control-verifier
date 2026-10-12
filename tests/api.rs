@@ -131,6 +131,7 @@ fn build(sink: Arc<dyn DecisionSink>) -> (axum::Router, Arc<Mutex<Store>>, Named
         master,
         secret: SECRET.to_string(),
         sink,
+        jobs: std::sync::Arc::new(access_control_verifier::writer::NoopJobPublisher),
     };
     (access_control_verifier::app(state, None), store, db)
 }
@@ -515,6 +516,7 @@ async fn noop_sink_serves_requests_without_capture() {
         master: Key::from_hex(MASTER_HEX).expect("master key hex"),
         secret: SECRET.to_string(),
         sink: Arc::new(NoopSink),
+        jobs: Arc::new(access_control_verifier::writer::NoopJobPublisher),
     };
     let app = access_control_verifier::app(state, None);
 

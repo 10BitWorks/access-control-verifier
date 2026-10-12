@@ -452,13 +452,39 @@ impl Store {
         Ok(JobTake::Taken(job))
     }
 
+    /// Live (unconsumed, unexpired) provisioning jobs, newest first — the
+    /// admin UI's pending list (T6). `device` filters to one writer.
+    pub fn pending_jobs(
+        &self,
+        device: Option<&str>,
+        now: &str,
+    ) -> rusqlite::Result<Vec<PendingJobRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT job_id, uid, member_key, device_id, created_at, expires_at
+             FROM jobs
+             WHERE consumed_at IS NULL AND expires_at > ?1
+               AND (?2 IS NULL OR device_id = ?2)
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![now, device], |row| {
+            Ok(PendingJobRow {
+                job_id: row.get(0)?,
+                uid: row.get(1)?,
+                member_key: row.get(2)?,
+                device_id: row.get(3)?,
+                created_at: row.get(4)?,
+                expires_at: row.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
     /// Claim a job for a specific tag id. A wildcard job (empty `uid`) binds
     /// its uid on first claim; a fixed-uid job never changes its uid. Single-use
     /// semantics mirror `take_job`; the uid transition commits under an
     /// IMMEDIATE transaction so a concurrent claim observes the bound uid.
     pub fn claim_job(
-        &mut self,
-        job_id: &str,
+        &mut self,        job_id: &str,
         uid_hex: &str,
         now: &str,
     ) -> rusqlite::Result<JobClaim> {
@@ -749,6 +775,18 @@ pub struct JobRow {
     pub device_id: String,
     pub expires_at: String,
     pub consumed_at: Option<String>,
+}
+
+/// A live provisioning job as shown in the admin UI's pending list (T6).
+/// An empty `uid` is a wildcard job whose tag has not been tapped yet.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PendingJobRow {
+    pub job_id: String,
+    pub uid: String,
+    pub member_key: String,
+    pub device_id: String,
+    pub created_at: String,
+    pub expires_at: String,
 }
 
 #[derive(Debug)]

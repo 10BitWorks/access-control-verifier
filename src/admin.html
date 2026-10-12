@@ -68,6 +68,22 @@
         <tr><th>ID</th><th>Time</th><th>Device</th><th>UID</th><th>Counter</th><th>Decision</th><th>Reason</th></tr>
     </table>
 
+    <section id="provision">
+        <h2>Provisioning (Tap-to-Enroll)</h2>
+        <form id="provision-form">
+            <select id="prov-device"></select>
+            <select id="prov-member"></select>
+            <label><input type="checkbox" id="prov-wildcard" checked> Wildcard (bind on tap)</label>
+            <input type="text" id="prov-uid" placeholder="UID (hex, fixed-uid mode)" disabled>
+            <button type="submit" id="prov-arm">Arm writer</button>
+            <button type="button" id="prov-cancel" disabled>Cancel</button>
+        </form>
+        <p id="prov-status">Idle.</p>
+        <table id="prov-jobs-table">
+            <tr><th>Job</th><th>Device</th><th>Member</th><th>UID</th><th>Created</th><th>Expires</th><th>Action</th></tr>
+        </table>
+    </section>
+
     <script>
         // Use current auth/cookie headers for fetch. 
         // If testing via API, ensure Bearer token or cookie is set.
@@ -139,7 +155,110 @@
         window.revoke = async function(uid) {
             if (confirm(`Revoke tag ${uid}?`)) {
                 await api(`/tags/${uid}/revoke`, {method: 'POST'});
-                load();
+        // --- Provisioning (tap-to-enroll) -----------------------------------
+        let provJobId = null;
+        let provPoller = null;
+
+        function provStatus(msg) {
+            document.getElementById('prov-status').innerText = msg;
+        }
+
+        async function loadProvSelects() {
+            const devices = await api('/devices');
+            const devSel = document.getElementById('prov-device');
+            devSel.innerHTML = '';
+            devices.filter(d => d.role === 'writer' || d.role === 'both').forEach(d => {
+                const opt = document.createElement('option');
+                opt.value = d.device_id;
+                opt.textContent = `${d.device_id} (${d.role})`;
+                devSel.appendChild(opt);
+            });
+            const members = await api('/members');
+            const memSel = document.getElementById('prov-member');
+            memSel.innerHTML = '';
+            members.filter(m => !m.member_key.startsWith('deleted_')).forEach(m => {
+                const opt = document.createElement('option');
+                opt.value = m.member_key;
+                opt.textContent = m.display_name ? `${m.display_name} (${m.member_key})` : m.member_key;
+                memSel.appendChild(opt);
+            });
+        }
+
+        async function provRefresh() {
+            const jobs = await api('/jobs/pending');
+            const tbody = document.getElementById('prov-jobs-table');
+            tbody.innerHTML = '<tr><th>Job</th><th>Device</th><th>Member</th><th>UID</th><th>Created</th><th>Expires</th><th>Action</th></tr>';
+            jobs.forEach(j => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `<td>${j.job_id.slice(0, 8)}…</td><td>${j.device_id}</td><td>${j.member_key}</td><td>${j.uid === '' ? '(wildcard)' : j.uid}</td><td>${j.created_at}</td><td>${j.expires_at}</td>
+                <td><button onclick="provCancel('${j.job_id}')">Cancel</button></td>`;
+                tbody.appendChild(tr);
+            });
+            if (provJobId) {
+                const mine = jobs.find(j => j.job_id === provJobId);
+                if (!mine) {
+                    provStatus(`Job ${provJobId.slice(0, 8)}… finished (enrolled, cancelled, or expired).`);
+                    provReset();
+                } else if (mine.uid !== '') {
+                    provStatus(`Job armed — tag captured (${mine.uid}). Waiting for writer…`);
+                } else {
+                    provStatus(`Job armed (wildcard) — tap a blank NTAG 424 on the writer now.`);
+                }
+            }
+        }
+
+        function provReset() {
+            provJobId = null;
+            if (provPoller) { clearInterval(provPoller); provPoller = null; }
+            document.getElementById('prov-arm').disabled = false;
+            document.getElementById('prov-cancel').disabled = true;
+        }
+
+        window.provCancel = async function (jobId) {
+            await api('/jobs/' + jobId, { method: 'DELETE' });
+            if (jobId === provJobId) provReset();
+            provStatus(`Job ${jobId.slice(0, 8)}… cancelled.`);
+            await provRefresh();
+        };
+
+        document.getElementById('prov-wildcard').addEventListener('change', (e) => {
+            document.getElementById('prov-uid').disabled = e.target.checked;
+        });
+
+        document.getElementById('provision-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const body = {
+                member_key: document.getElementById('prov-member').value,
+                device_id: document.getElementById('prov-device').value,
+                ttl_secs: 120,
+            };
+            if (!document.getElementById('prov-wildcard').checked) {
+                body.uid = document.getElementById('prov-uid').value.trim();
+            }
+            // The Arm call posts to the admin-authed jobs endpoint (same writer
+            // protocol; /v1/jobs itself requires a bearer token the proxied
+            // browser session does not hold).
+            const res = await fetch('/admin/api/jobs', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            if (!res.ok) {
+                const err = await res.json();
+                provStatus(`Arm failed: ${err.error}`);
+                return;
+            }
+            const created = await res.json();
+            provJobId = created.job_id;
+            provStatus(`Job ${provJobId.slice(0, 8)}… armed (expires ${created.expires_at}).`);
+            document.getElementById('prov-arm').disabled = true;
+            document.getElementById('prov-cancel').disabled = false;
+            if (provPoller) clearInterval(provPoller);
+            provPoller = setInterval(() => provRefresh().catch(() => {}), 2000);
+            await provRefresh();
+        });
+
+        load();
             }
         };
 
@@ -196,6 +315,8 @@
         };
 
         load();
+        loadProvSelects().catch(() => {});
+        provRefresh().catch(() => {});
     </script>
 </body>
 </html>

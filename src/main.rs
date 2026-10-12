@@ -84,6 +84,7 @@ async fn main() -> anyhow::Result<()> {
         sink = Arc::new(NoopSink);
     }
 
+    let jobs_for_admin = Arc::clone(&jobs);
     let writer_state = access_control_verifier::writer::WriterState {
         store: Arc::clone(&store_arc),
         master: master.clone(),
@@ -92,10 +93,11 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let state = AppState {
-        store: store_arc,
+        store: Arc::clone(&store_arc),
         master,
         secret: env::var("EMQX_SHARED_SECRET").unwrap_or_default(),
         sink,
+        jobs: jobs_for_admin,
     };
 
     let bind_addr = env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8000".to_string());

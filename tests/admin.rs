@@ -34,6 +34,7 @@ fn setup() -> Fixture {
         master: Key::from_hex(MASTER_HEX).unwrap(),
         secret: "secret".to_string(),
         sink: Arc::new(NoopSink),
+        jobs: Arc::new(access_control_verifier::writer::NoopJobPublisher),
     };
 
     Fixture {
@@ -271,4 +272,134 @@ async fn admin_set_device_role() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+// ---------------------------------------------------------------------------
+// T6: provisioning panel — pending list, cancel, arm
+// ---------------------------------------------------------------------------
+
+/// DELETE helper.
+async fn del(app: &axum::Router, path: &str, token: Option<&str>) -> (StatusCode, Value) {
+    let mut builder = Request::builder().method("DELETE").uri(path);
+    if let Some(t) = token {
+        builder = builder.header("Authorization", format!("Bearer {}", t));
+    }
+    let req = builder.body(Body::empty()).unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap_or(json!({}));
+    (status, body)
+}
+
+fn writer_fixture() -> Fixture {
+    std::env::set_var("ADMIN_BEARER_TOKEN", "test-token");
+    let db = NamedTempFile::new().expect("temp db file");
+    let mut store = Store::open(db.path()).expect("store opens");
+    store.conn_mut().execute(
+        "INSERT INTO members (member_key, display_name, active_until) VALUES ('m1', 'Member 1', datetime('now', '+10 days'))",
+        [],
+    ).unwrap();
+    store.conn_mut().execute(
+        "INSERT INTO devices (device_id, role, presence, last_seen) VALUES ('writer-1', 'writer', 'offline', '')",
+        [],
+    ).unwrap();
+    let store = Arc::new(Mutex::new(store));
+    let state = AppState {
+        store,
+        master: Key::from_hex(MASTER_HEX).unwrap(),
+        secret: "secret".to_string(),
+        sink: Arc::new(NoopSink),
+        jobs: Arc::new(access_control_verifier::writer::NoopJobPublisher),
+    };
+    Fixture {
+        app: access_control_verifier::admin::router(state),
+        _db: db,
+    }
+}
+
+#[tokio::test]
+async fn test_pending_list_unknown_device_returns_empty_array() {
+    let f = writer_fixture();
+    let (status, body) = get(&f.app, "/admin/api/jobs/pending?device=who-dis", Some("test-token")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!([]));
+}
+
+#[tokio::test]
+async fn test_arm_and_cancel_wildcard_job() {
+    let f = writer_fixture();
+
+    // Arm a wildcard job through the admin route.
+    let (status, body) = post(
+        &f.app,
+        "/admin/api/jobs",
+        Some("test-token"),
+        json!({ "member_key": "m1", "device_id": "writer-1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "arm body: {}", body);
+    let job_id = body["job_id"].as_str().expect("job_id").to_string();
+
+    // Pending list shows it, uid still empty (wildcard).
+    let (status, body) = get(&f.app, "/admin/api/jobs/pending", Some("test-token")).await;
+    assert_eq!(status, StatusCode::OK);
+    let jobs = body.as_array().expect("array");
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0]["job_id"], json!(job_id));
+    assert_eq!(jobs[0]["uid"], json!(""));
+
+    // Cancel marks the job consumed (fail_job audit job_failed).
+    let (status, body) = del(&f.app, &format!("/admin/api/jobs/{}", job_id), Some("test-token")).await;
+    assert_eq!(status, StatusCode::OK, "cancel body: {}", body);
+    assert_eq!(body["status"], json!("cancelled"));
+
+    // Pending list is now empty for that job.
+    let (_, body) = get(&f.app, "/admin/api/jobs/pending", Some("test-token")).await;
+    assert_eq!(body, json!([]));
+
+    // Second cancel: job already consumed -> 404.
+    let (status, _) = del(&f.app, &format!("/admin/api/jobs/{}", job_id), Some("test-token")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_arm_rejects_non_writer_device_and_bad_uid() {
+    let f = writer_fixture();
+
+    // Gate device is not a writer.
+    let (status, _) = post(
+        &f.app,
+        "/admin/api/jobs",
+        Some("test-token"),
+        json!({ "member_key": "m1", "device_id": "gate-1" }),
+    )
+    .await;
+    // gate-1 doesn't exist at all -> 404 (unknown device).
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Bad uid hex -> 422.
+    let (status, _) = post(
+        &f.app,
+        "/admin/api/jobs",
+        Some("test-token"),
+        json!({ "uid": "nothex", "member_key": "m1", "device_id": "writer-1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn test_admin_page_renders_provisioning_section() {
+    let f = writer_fixture();
+    let mut builder = Request::builder().uri("/admin");
+    builder = builder.header("Authorization", "Bearer test-token");
+    let req = builder.body(Body::empty()).unwrap();
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8_lossy(&bytes);
+    assert!(html.contains("id=\"provision\""), "provision section missing");
+    assert!(html.contains("Arm writer"), "arm button missing");
+    assert!(html.contains("/admin/api/jobs"), "arm endpoint missing");
 }

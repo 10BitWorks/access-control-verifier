@@ -30,6 +30,10 @@ pub struct AppState {
     pub master: Key,
     pub secret: String,
     pub sink: Arc<dyn DecisionSink>,
+    /// Provisioning job publisher (T6): lets the admin UI arm writer jobs
+    /// under the admin middleware (the writer's `/v1/jobs` bearer path is
+    /// unusable from an Authentik-proxied browser session).
+    pub jobs: Arc<dyn crate::writer::JobPublisher>,
 }
 
 #[derive(Debug, Deserialize)]

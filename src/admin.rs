@@ -3,7 +3,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use serde::Deserialize;
@@ -21,6 +21,9 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/api/members", get(list_members))
         .route("/admin/api/devices", get(list_devices).post(upsert_device))
         .route("/admin/api/devices/{device_id}/role", post(set_device_role))
+        .route("/admin/api/jobs", post(arm_job))
+        .route("/admin/api/jobs/pending", get(pending_jobs))
+        .route("/admin/api/jobs/{job_id}", delete(cancel_job))
         .route(
             "/admin/api/overrides",
             get(list_overrides).post(create_override),
@@ -192,6 +195,177 @@ async fn set_device_role(
 #[derive(Deserialize)]
 struct RoleSet {
     role: String,
+}
+
+// ---------------------------------------------------------------------------
+// Provisioning (T6): arm writer jobs / pending list / cancel — same writer
+// protocol as `writer::create_job`, but behind the admin middleware so an
+// Authentik-proxied browser session can drive it.
+// ---------------------------------------------------------------------------
+
+use crate::writer::job_payload;
+use crate::{crypto::diversify, writer::MAX_TTL_SECS};
+
+#[derive(Deserialize)]
+struct ArmJobRequest {
+    /// Absent/empty ⇒ wildcard job (uid bound on first claim).
+    #[serde(default)]
+    uid: Option<String>,
+    member_key: String,
+    device_id: String,
+    #[serde(default = "default_arm_ttl")]
+    ttl_secs: u64,
+}
+
+fn default_arm_ttl() -> u64 {
+    // Mirrors writer::DEFAULT_TTL_SECS (private there).
+    120
+}
+
+async fn arm_job(State(state): State<AppState>, Json(req): Json<ArmJobRequest>) -> Response {
+    // Mirrors writer::create_job's validation exactly.
+    let is_wildcard = req.uid.as_deref().is_none_or(|u| u.is_empty());
+    let (uid_hex, key_hex) = if is_wildcard {
+        (String::new(), String::new())
+    } else {
+        let raw = req.uid.as_deref().unwrap_or("");
+        let uid = match crate::crypto::Uid::from_hex(raw) {
+            Ok(u) => u,
+            Err(_) => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({"error": "invalid uid"})),
+                )
+                    .into_response()
+            }
+        };
+        (
+            raw.to_ascii_lowercase(),
+            hex::encode(diversify(&state.master, &uid).0),
+        )
+    };
+    if req.member_key.is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": "member_key required"})),
+        )
+            .into_response();
+    }
+    if req.ttl_secs == 0 || req.ttl_secs > MAX_TTL_SECS {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": "ttl_secs must be within 1..=120"})),
+        )
+            .into_response();
+    }
+
+    let now = chrono::Utc::now();
+    let expires_at = (now + chrono::Duration::seconds(req.ttl_secs as i64)).to_rfc3339();
+
+    let job_id = {
+        let mut store = state.store.lock().expect("store lock poisoned");
+        let role = match store.device_role(&req.device_id) {
+            Ok(Some(role)) => role,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": "unknown device"})),
+                )
+                    .into_response()
+            }
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "store error"})),
+                )
+                    .into_response()
+            }
+        };
+        if !matches!(role.as_str(), "writer" | "both") {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "device is not a writer"})),
+            )
+                .into_response();
+        }
+        match store.create_job(
+            &uid_hex,
+            &req.member_key,
+            &req.device_id,
+            &now.to_rfc3339(),
+            &expires_at,
+        ) {
+            Ok(id) => id,
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "store error"})),
+                )
+                    .into_response()
+            }
+        }
+    };
+
+    let payload = job_payload(&uid_hex, &key_hex, &job_id, &expires_at);
+    state.jobs.publish_job(&req.device_id, &payload);
+
+    (
+        StatusCode::CREATED,
+        Json(json!({ "job_id": job_id, "expires_at": expires_at })),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct PendingQuery {
+    device: Option<String>,
+}
+
+async fn pending_jobs(
+    State(state): State<AppState>,
+    Query(query): Query<PendingQuery>,
+) -> Response {
+    let store = state.store.lock().expect("store lock poisoned");
+    let now = chrono::Utc::now().to_rfc3339();
+    match store.pending_jobs(query.device.as_deref(), &now) {
+        Ok(jobs) => (StatusCode::OK, Json(jobs)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn cancel_job(State(state): State<AppState>, Path(job_id): Path<String>) -> Response {
+    let mut store = state.store.lock().expect("store lock poisoned");
+    let now = chrono::Utc::now().to_rfc3339();
+    // Only a live (pending) job can be cancelled — `fail_job` alone would
+    // happily re-consume and re-audit an already-consumed job.
+    let live = store
+        .pending_jobs(None, &now)
+        .map(|jobs| jobs.iter().any(|j| j.job_id == job_id))
+        .unwrap_or(false);
+    if !live {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "unknown or already-consumed job"})),
+        )
+            .into_response();
+    }
+    match store.fail_job(&job_id, &now, "cancelled") {
+        Ok(true) => (StatusCode::OK, Json(json!({"status": "cancelled"}))).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "unknown or already-consumed job"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
 }
 
 async fn list_overrides(State(state): State<AppState>) -> Response {

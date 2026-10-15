@@ -410,7 +410,7 @@ async fn cmd_publish_reaches_subscribed_reader() {
     let payload: Value = serde_json::from_slice(&publish.payload).expect("payload is JSON");
     assert_eq!(
         payload,
-        json!({"grant": true, "reason": "ok", "pulse_ms": 300})
+        json!({"grant": true, "reason": "ok"})
     );
 
     sink_pump.abort();

@@ -8,7 +8,7 @@
 //! Physical custody of such a reader therefore implies custody of the tag keys
 //! it holds; readers without `offline_verify` never receive key material.
 
-use crate::api::{DecisionSink, PULSE_MS};
+use crate::api::DecisionSink;
 use crate::crypto::{diversify, Key, Uid};
 use crate::store::{JobClaim, Store};
 use crate::writer::{consume_job, job_payload, ConsumeOutcome};
@@ -93,7 +93,7 @@ impl MqttSink {
 impl DecisionSink for MqttSink {
     fn publish_cmd(&self, reader: &str, grant: bool, reason: &str) {
         let topic = format!("access/{reader}/cmd");
-        let payload = json!({ "grant": grant, "reason": reason, "pulse_ms": PULSE_MS }).to_string();
+        let payload = json!({ "grant": grant, "reason": reason }).to_string();
         if let Err(e) = self
             .client
             .try_publish(topic, QoS::AtLeastOnce, false, payload)

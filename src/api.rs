@@ -11,7 +11,6 @@ use serde::Deserialize;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
-pub const PULSE_MS: u32 = 300;
 const MAX_COUNTER: u64 = 0xFF_FFFF;
 
 pub trait DecisionSink: Send + Sync {
@@ -157,7 +156,6 @@ async fn auth(
             "grant": grant,
             "reason": reason,
             "name": name,
-            "pulse_ms": PULSE_MS,
         })),
     )
         .into_response()

@@ -215,7 +215,7 @@ async fn grants_when_cmac_counter_and_membership_are_valid() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body,
-        json!({"grant": true, "reason": "ok", "name": "Test Member", "pulse_ms": 300})
+        json!({"grant": true, "reason": "ok", "name": "Test Member"})
     );
     assert_eq!(
         f.sink.pop(),
@@ -240,7 +240,7 @@ async fn denies_unknown_tag_with_no_counter_state() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body,
-        json!({"grant": false, "reason": "unknown_tag", "name": null, "pulse_ms": 300})
+        json!({"grant": false, "reason": "unknown_tag", "name": null})
     );
     assert_eq!(
         f.sink.pop(),
@@ -273,7 +273,7 @@ async fn denies_bad_cmac_without_advancing_counter() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body,
-        json!({"grant": false, "reason": "bad_cmac", "name": null, "pulse_ms": 300})
+        json!({"grant": false, "reason": "bad_cmac", "name": null})
     );
     assert_eq!(
         f.sink.pop(),
@@ -302,7 +302,7 @@ async fn second_tap_with_same_counter_is_counter_replay() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         second,
-        json!({"grant": false, "reason": "counter_replay", "name": null, "pulse_ms": 300})
+        json!({"grant": false, "reason": "counter_replay", "name": null})
     );
     assert_eq!(
         f.sink.pop(),
@@ -326,7 +326,7 @@ async fn expired_membership_responds_member_inactive() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body,
-        json!({"grant": false, "reason": "member_inactive", "name": null, "pulse_ms": 300})
+        json!({"grant": false, "reason": "member_inactive", "name": null})
     );
     assert_eq!(
         f.sink.pop(),
@@ -346,7 +346,7 @@ async fn ban_override_responds_override() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body,
-        json!({"grant": false, "reason": "override", "name": null, "pulse_ms": 300})
+        json!({"grant": false, "reason": "override", "name": null})
     );
     assert_eq!(
         f.sink.pop(),
@@ -365,7 +365,7 @@ async fn revoked_tag_maps_to_override() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body,
-        json!({"grant": false, "reason": "override", "name": null, "pulse_ms": 300})
+        json!({"grant": false, "reason": "override", "name": null})
     );
     assert_eq!(
         f.sink.pop(),
@@ -383,7 +383,7 @@ async fn missing_member_row_maps_to_member_inactive() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body,
-        json!({"grant": false, "reason": "member_inactive", "name": null, "pulse_ms": 300})
+        json!({"grant": false, "reason": "member_inactive", "name": null})
     );
     assert_eq!(
         f.sink.pop(),
@@ -528,6 +528,6 @@ async fn noop_sink_serves_requests_without_capture() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body,
-        json!({"grant": true, "reason": "ok", "name": "Test Member", "pulse_ms": 300})
+        json!({"grant": true, "reason": "ok", "name": "Test Member"})
     );
 }

@@ -67,3 +67,19 @@ CREATE TABLE IF NOT EXISTS jobs (
     expires_at TEXT NOT NULL,
     consumed_at TEXT
 );
+
+-- One ACTIVE tag per member: a valid key for an identity is singular, like
+-- a password. Enrollment is REPLACEMENT — provisioning a new tag revokes
+-- the member's other tags (lost-card flow: enroll the replacement through
+-- the supervised provisioning flow, then the lost plastic is inert). A
+-- revoked tag is revivable only by re-provisioning it, which re-keys it.
+--
+-- Migration (idempotent): before the index exists (or if it was somehow
+-- evaded), retire every active tag except the member's newest-enrolled one.
+UPDATE tags SET status = 'revoked'
+WHERE status = 'active' AND rowid NOT IN (
+    SELECT MAX(rowid) FROM tags WHERE status = 'active' GROUP BY member_key
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_one_active_per_member
+    ON tags(member_key) WHERE status = 'active';

@@ -34,8 +34,7 @@ impl Store {
     }
 
     pub fn apply_schema(&mut self) -> rusqlite::Result<()> {
-        let schema = include_str!("../schema.sql");
-        self.conn.execute_batch(schema)?;
+        Self::apply_schema_to(&self.conn)?;
 
         let tx = self.conn.transaction()?;
         let defaults = [
@@ -56,6 +55,15 @@ impl Store {
         Ok(())
     }
 
+    /// Idempotent schema application, including the one-active-tag-per-member
+    /// migration (see schema.sql). Split out so the migration itself is
+    /// unit-testable against pre-existing data.
+    fn apply_schema_to(conn: &Connection) -> rusqlite::Result<()> {
+        let schema = include_str!("../schema.sql");
+        conn.execute_batch(schema)?;
+        Ok(())
+    }
+
     pub fn enroll_tag(
         &mut self,
         uid: &str,
@@ -63,7 +71,17 @@ impl Store {
         key_version: i64,
         timestamp: &str,
     ) -> rusqlite::Result<()> {
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        // Replacement semantics: a member holds at most one active tag. The
+        // partial unique index (idx_tags_one_active_per_member) enforces the
+        // invariant at the storage layer; this revoke must run first so the
+        // upsert below does not collide with the member's previous tag.
+        tx.execute(
+            "UPDATE tags SET status = 'revoked'
+             WHERE member_key = ?1 AND uid != ?2 AND status = 'active'",
+            params![member_key, uid],
+        )?;
+        tx.execute(
             "INSERT INTO tags (uid, member_key, key_version, last_counter, status, enrolled_at)
              VALUES (?1, ?2, ?3, 0, 'active', ?4)
              ON CONFLICT(uid) DO UPDATE SET
@@ -73,6 +91,7 @@ impl Store {
              enrolled_at = excluded.enrolled_at",
             params![uid, member_key, key_version, timestamp],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -582,7 +601,16 @@ impl Store {
         last_counter: i64,
         timestamp: &str,
     ) -> rusqlite::Result<()> {
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        // Replacement semantics (see enroll_tag): the member's other tags
+        // become inert the moment this one is accepted. The unique partial
+        // index makes a second active tag unrepresentable; revoke first.
+        tx.execute(
+            "UPDATE tags SET status = 'revoked'
+             WHERE member_key = ?1 AND uid != ?2 AND status = 'active'",
+            params![member_key, uid],
+        )?;
+        tx.execute(
             "INSERT INTO tags (uid, member_key, key_version, last_counter, status, enrolled_at)
              VALUES (?1, ?2, ?3, ?4, 'active', ?5)
              ON CONFLICT(uid) DO UPDATE SET
@@ -593,6 +621,7 @@ impl Store {
              enrolled_at = excluded.enrolled_at",
             params![uid, member_key, key_version, last_counter, timestamp],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -876,4 +905,126 @@ pub struct SyncStateInfo {
     pub last_success: Option<String>,
     pub last_attempt: Option<String>,
     pub detail: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_mem() -> Store {
+        Store::open(":memory:").expect("open :memory: store")
+    }
+
+    fn status_of(store: &Store, uid: &str) -> String {
+        store
+            .conn
+            .query_row(
+                "SELECT status FROM tags WHERE uid = ?1",
+                params![uid],
+                |r| r.get(0),
+            )
+            .expect("tag row exists")
+    }
+
+    #[test]
+    fn enrolling_new_tag_revokes_members_previous_active_tag() {
+        let mut store = open_mem();
+        store
+            .enroll_job_tag("uid-old", "member-a", 1, 5, "2026-10-15T00:00:00Z")
+            .unwrap();
+        store
+            .enroll_job_tag("uid-new", "member-a", 1, 1, "2026-10-15T01:00:00Z")
+            .unwrap();
+        assert_eq!(status_of(&store, "uid-old"), "revoked");
+        assert_eq!(status_of(&store, "uid-new"), "active");
+    }
+
+    #[test]
+    fn reenrolling_same_uid_keeps_it_active_and_revokes_others() {
+        // Found-card flow: the lost tag was replaced (revoked), then found
+        // and re-provisioned under supervision — it comes back, the current
+        // tag retires.
+        let mut store = open_mem();
+        store
+            .enroll_job_tag("uid-lost", "member-a", 1, 9, "2026-10-14T00:00:00Z")
+            .unwrap();
+        store
+            .enroll_job_tag("uid-cur", "member-a", 1, 1, "2026-10-15T00:00:00Z")
+            .unwrap();
+        assert_eq!(status_of(&store, "uid-lost"), "revoked");
+
+        store
+            .enroll_job_tag("uid-lost", "member-a", 1, 12, "2026-10-16T00:00:00Z")
+            .unwrap();
+        assert_eq!(status_of(&store, "uid-lost"), "active");
+        assert_eq!(status_of(&store, "uid-cur"), "revoked");
+    }
+
+    #[test]
+    fn admin_enroll_path_enforces_replacement_too() {
+        let mut store = open_mem();
+        store.enroll_tag("uid-a", "member-a", 1, "2026-10-15T00:00:00Z").unwrap();
+        store.enroll_tag("uid-b", "member-a", 1, "2026-10-15T01:00:00Z").unwrap();
+        assert_eq!(status_of(&store, "uid-a"), "revoked");
+        assert_eq!(status_of(&store, "uid-b"), "active");
+    }
+
+    #[test]
+    fn second_active_tag_per_member_is_unrepresentable() {
+        // The invariant lives in the storage layer: no code path, present or
+        // future, can create a concurrently-valid second tag for a member.
+        let mut store = open_mem();
+        store
+            .enroll_job_tag("uid-a", "member-a", 1, 1, "2026-10-15T00:00:00Z")
+            .unwrap();
+        let raw = conn_raw_insert_second_active(&store, "member-a");
+        assert!(raw.is_err(), "unique partial index must reject it");
+    }
+
+    fn conn_raw_insert_second_active(store: &Store, member_key: &str) -> rusqlite::Result<usize> {
+        store.conn.execute(
+            "INSERT INTO tags (uid, member_key, key_version, last_counter, status, enrolled_at)
+             VALUES ('uid-rogue', ?1, 1, 0, 'active', '2026-10-15T02:00:00Z')",
+            params![member_key],
+        )
+    }
+
+    #[test]
+    fn migration_retires_preexisting_concurrently_active_tags() {
+        // Tags enrolled before the policy existed: the schema migration must
+        // retire all but the newest-enrolled active tag per member.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tags (
+                uid TEXT PRIMARY KEY,
+                member_key TEXT NOT NULL,
+                key_version INTEGER NOT NULL DEFAULT 1,
+                last_counter INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active',
+                note TEXT,
+                enrolled_at TEXT NOT NULL
+            );
+            INSERT INTO tags (uid, member_key, status, enrolled_at) VALUES
+                ('uid-oldest', 'member-a', 'active', '2026-10-07T00:00:00Z'),
+                ('uid-middle', 'member-a', 'active', '2026-10-15T01:32:48Z'),
+                ('uid-newest', 'member-a', 'active', '2026-10-15T01:35:27Z'),
+                ('uid-other',  'member-b', 'active', '2026-10-01T00:00:00Z');",
+        )
+        .unwrap();
+
+        Store::apply_schema_to(&conn).unwrap();
+
+        let status = |uid: &str| -> String {
+            conn.query_row(
+                "SELECT status FROM tags WHERE uid = ?1",
+                params![uid],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(status("uid-newest"), "active");
+        assert_eq!(status("uid-oldest"), "revoked");
+        assert_eq!(status("uid-middle"), "revoked");
+        assert_eq!(status("uid-other"), "active", "other members untouched");
+    }
 }

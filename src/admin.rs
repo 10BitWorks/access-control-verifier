@@ -30,6 +30,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/admin/api/audit", get(list_audit))
         .route("/admin/api/sync-state", get(sync_state))
+        .route("/admin/api/sync", post(trigger_sync))
         .route("/admin/api/config", get(list_config).post(set_config))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -440,6 +441,35 @@ async fn sync_state(State(state): State<AppState>) -> Response {
     match store.sync_state() {
         Ok(Some(s)) => (StatusCode::OK, Json(s)).into_response(),
         Ok(None) => (StatusCode::OK, Json(json!({}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn trigger_sync(State(state): State<AppState>) -> Response {
+    let sync_cfg = match crate::sync::SyncConfig::from_env() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("Sync config error: {e}")})),
+            )
+                .into_response();
+        }
+    };
+    match crate::sync::run_sync_cycle(state.store.clone(), &sync_cfg).await {
+        Ok(stats) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "ok",
+                "added_or_updated": stats.added_or_updated,
+                "removed": stats.removed,
+            })),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),

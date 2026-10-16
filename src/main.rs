@@ -100,6 +100,20 @@ async fn main() -> anyhow::Result<()> {
         jobs: jobs_for_admin,
     };
 
+    if let Ok(sync_cfg) = access_control_verifier::sync::SyncConfig::from_env() {
+        if !sync_cfg.authentik_token.is_empty() && sync_cfg.authentik_token != "dummy" {
+            println!(
+                "Authentik sync enabled: group '{}' every {} min",
+                sync_cfg.authentik_group, sync_cfg.sync_interval_minutes
+            );
+            access_control_verifier::sync::spawn_worker(store_arc.clone(), sync_cfg);
+        } else {
+            println!("Authentik sync disabled (token empty or placeholder)");
+        }
+    } else {
+        println!("Authentik sync disabled (config not set)");
+    }
+
     let bind_addr = env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8000".to_string());
 
     let writer_router = access_control_verifier::writer::router(writer_state);

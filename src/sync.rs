@@ -55,7 +55,8 @@ pub struct AuthentikUser {
 
 #[derive(Deserialize, Debug, Default)]
 pub struct Pagination {
-    pub next: Option<String>,
+    #[serde(default)]
+    pub next: Option<serde_json::Value>,
     #[serde(default)]
     pub total_pages: usize,
 }
@@ -93,10 +94,8 @@ async fn fetch_all_users(config: &SyncConfig) -> Result<Vec<AuthentikUser>> {
         .build()
         .context("Failed to build HTTP client")?;
 
-    let url = format!(
-        "{}/api/v3/core/groups/{}/users/",
-        config.authentik_url, config.authentik_group
-    );
+    let base = config.authentik_url.trim_end_matches('/');
+    let url = format!("{}/api/v3/core/users/", base);
     let mut users: Vec<AuthentikUser> = Vec::new();
     let mut page: usize = 1;
 
@@ -104,7 +103,11 @@ async fn fetch_all_users(config: &SyncConfig) -> Result<Vec<AuthentikUser>> {
         let page_str = page.to_string();
         let resp = client
             .get(&url)
-            .query(&[("page_size", "100"), ("page", page_str.as_str())])
+            .query(&[
+                ("groups_by_name", config.authentik_group.as_str()),
+                ("page_size", "100"),
+                ("page", page_str.as_str()),
+            ])
             .header(
                 "Authorization",
                 format!("Bearer {}", config.authentik_token),
@@ -124,11 +127,11 @@ async fn fetch_all_users(config: &SyncConfig) -> Result<Vec<AuthentikUser>> {
             .context("Authentik response parse failed")?;
         users.extend(body.results);
 
-        let has_next = body
-            .pagination
-            .next
-            .as_deref()
-            .is_some_and(|next| !next.is_empty());
+        let has_next = match &body.pagination.next {
+            Some(serde_json::Value::Number(n)) => n.as_u64().unwrap_or(0) > 0,
+            Some(serde_json::Value::String(s)) => !s.is_empty() && s != "0",
+            _ => false,
+        };
         let has_more_pages = body.pagination.total_pages > 0 && page < body.pagination.total_pages;
         if !has_next && !has_more_pages {
             break;

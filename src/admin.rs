@@ -13,29 +13,32 @@ use std::env;
 use crate::api::AppState;
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/admin", get(admin_ui))
-        .route("/admin/api/tags", get(list_tags))
-        .route("/admin/api/tags/enroll", post(enroll_tag))
-        .route("/admin/api/tags/{uid}/revoke", post(revoke_tag))
-        .route("/admin/api/members", get(list_members))
-        .route("/admin/api/devices", get(list_devices).post(upsert_device))
-        .route("/admin/api/devices/{device_id}/role", post(set_device_role))
-        .route("/admin/api/jobs", post(arm_job))
-        .route("/admin/api/jobs/pending", get(pending_jobs))
-        .route("/admin/api/jobs/{job_id}", delete(cancel_job))
+    let api_routes = Router::new()
+        .route("/tags", get(list_tags))
+        .route("/tags/enroll", post(enroll_tag))
+        .route("/tags/{uid}/revoke", post(revoke_tag))
+        .route("/members", get(list_members))
+        .route("/devices", get(list_devices).post(upsert_device))
+        .route("/devices/{device_id}/role", post(set_device_role))
+        .route("/jobs", post(arm_job))
+        .route("/jobs/pending", get(pending_jobs))
+        .route("/jobs/{job_id}", delete(cancel_job))
         .route(
-            "/admin/api/overrides",
+            "/overrides",
             get(list_overrides).post(create_override),
         )
-        .route("/admin/api/audit", get(list_audit))
-        .route("/admin/api/sync-state", get(sync_state))
-        .route("/admin/api/sync", post(trigger_sync))
-        .route("/admin/api/config", get(list_config).post(set_config))
+        .route("/audit", get(list_audit))
+        .route("/sync-state", get(sync_state))
+        .route("/sync", post(trigger_sync))
+        .route("/config", get(list_config).post(set_config))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
-        ))
+        ));
+
+    Router::new()
+        .route("/admin", get(admin_ui))
+        .nest("/admin/api", api_routes)
         .with_state(state)
 }
 
@@ -58,7 +61,32 @@ async fn auth_middleware(
         }
     }
 
-    // 2. Check trusted proxy header only if PROXY_AUTH_SECRET is configured and matches
+    // 2. Check Cookie matching admin_token=<token>
+    if let Some(cookie_hdr) = headers.get(axum::http::header::COOKIE) {
+        if let Ok(cookie_str) = cookie_hdr.to_str() {
+            for cookie in cookie_str.split(';') {
+                let cookie = cookie.trim();
+                if let Some(token) = cookie.strip_prefix("admin_token=") {
+                    if !bearer_token_env.is_empty() && token == bearer_token_env {
+                        return next.run(req).await;
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Check query parameter ?token=<token>
+    if let Some(query) = req.uri().query() {
+        for pair in query.split('&') {
+            if let Some(token) = pair.strip_prefix("token=") {
+                if !bearer_token_env.is_empty() && token == bearer_token_env {
+                    return next.run(req).await;
+                }
+            }
+        }
+    }
+
+    // 4. Check trusted proxy header only if PROXY_AUTH_SECRET is configured and matches
     if let (Some(email), Some(secret_hdr)) = (
         headers
             .get("x-authentik-email")

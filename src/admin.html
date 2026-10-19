@@ -196,6 +196,10 @@
         window.revoke = async function(uid) {
             if (confirm(`Revoke tag ${uid}?`)) {
                 await api(`/tags/${uid}/revoke`, {method: 'POST'});
+                load();
+            }
+        };
+
         // --- Provisioning (tap-to-enroll) -----------------------------------
         let provJobId = null;
         let provPoller = null;
@@ -281,7 +285,10 @@
             // browser session does not hold).
             const res = await fetch('/admin/api/jobs', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(getToken() ? { 'Authorization': 'Bearer ' + getToken() } : {}),
+                },
                 body: JSON.stringify(body),
             });
             if (!res.ok) {
@@ -298,10 +305,6 @@
             provPoller = setInterval(() => provRefresh().catch(() => {}), 2000);
             await provRefresh();
         });
-
-        load();
-            }
-        };
 
         document.getElementById('enroll-form').onsubmit = async (e) => {
             e.preventDefault();

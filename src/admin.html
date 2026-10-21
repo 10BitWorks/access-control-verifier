@@ -132,6 +132,15 @@
             return res.json();
         }
 
+        let lastSyncAt = 0;
+        async function syncNow() {
+            // Pull fresh members/groups from Authentik so this page never
+            // shows last hour's data. Throttled; failures are non-fatal and
+            // fall back to the cached SQLite state.
+            if (Date.now() - lastSyncAt < 30000) return;
+            try { await api('/sync', {method: 'POST'}); lastSyncAt = Date.now(); } catch (e) {}
+        }
+
         async function load() {
             const token = getToken();
             const input = document.getElementById('admin-token-input');
@@ -140,7 +149,9 @@
                 document.getElementById('auth-status').innerText = 'Token set.';
             }
             document.getElementById('error').innerText = '';
-            
+
+            await syncNow();
+
             api('/tags').then(tags => {
                 const tbody = document.getElementById('tags-table');
                 tbody.innerHTML = '<tr><th>UID</th><th>Member Key</th><th>Status</th><th>Version</th><th>Counter</th><th>Enrolled</th><th>Action</th></tr>';
@@ -209,6 +220,7 @@
         }
 
         async function loadProvSelects() {
+            await syncNow();
             const devices = await api('/devices');
             const devSel = document.getElementById('prov-device');
             devSel.innerHTML = '';

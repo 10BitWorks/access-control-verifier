@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>10BitWorks - My Key Card</title>
+    <style>
+        :root {
+            --primary: #4f46e5;
+            --primary-hover: #4338ca;
+            --bg: #f8fafc;
+            --card-bg: #ffffff;
+            --text: #0f172a;
+            --text-muted: #64748b;
+            --border: #e2e8f0;
+            --danger: #dc2626;
+            --danger-hover: #b91c1c;
+            --success: #16a34a;
+            --warning: #d97706;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 24px;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 16px;
+        }
+        h1 { margin: 0; font-size: 1.5rem; }
+        .user-nav {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        .badge-active { background: #dcfce7; color: #15803d; }
+        .badge-inactive { background: #fee2e2; color: #b91c1c; }
+        .badge-admin { background: #e0e7ff; color: #4338ca; }
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 24px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        }
+        h2 {
+            margin-top: 0;
+            font-size: 1.2rem;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 8px;
+            margin-bottom: 16px;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+        .stat-label {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-bottom: 4px;
+        }
+        .stat-value {
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+        button {
+            padding: 8px 16px;
+            border-radius: 6px;
+            border: none;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        .btn-primary { background: var(--primary); color: white; }
+        .btn-primary:hover { background: var(--primary-hover); }
+        .btn-danger { background: var(--danger); color: white; }
+        .btn-danger:hover { background: var(--danger-hover); }
+        .btn-secondary { background: #e2e8f0; color: var(--text); }
+        .btn-secondary:hover { background: #cbd5e1; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin-top: 12px;
+        }
+        th, td {
+            border: 1px solid var(--border);
+            padding: 8px 12px;
+            text-align: left;
+            font-size: 0.9rem;
+        }
+        th { background: #f1f5f9; }
+        .alert {
+            padding: 12px 16px;
+            border-radius: 6px;
+            margin-bottom: 16px;
+            font-size: 0.95rem;
+        }
+        .alert-error { background: #fee2e2; border: 1px solid #fecaca; color: #991b1b; }
+        .alert-warning { background: #fef3c7; border: 1px solid #fde68a; color: #92400e; }
+        .alert-info { background: #eff6ff; border: 1px solid #dbeafe; color: #1e40af; }
+        .countdown-box {
+            background: #fffbeb;
+            border: 1px solid #fef3c7;
+            padding: 16px;
+            border-radius: 6px;
+            margin-top: 16px;
+            text-align: center;
+        }
+        .countdown-timer {
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: var(--warning);
+            margin: 8px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div>
+                <h1>10BitWorks Key Portal</h1>
+            </div>
+            <div id="nav-user" class="user-nav">
+                <!-- Injected via JS -->
+            </div>
+        </header>
+
+        <div id="alert-container"></div>
+
+        <!-- Anonymous / Login CTA -->
+        <div id="login-section" class="card" style="display:none; text-align: center; padding: 40px 20px;">
+            <h2>Welcome to Key Card Management</h2>
+            <p style="color: var(--text-muted); margin-bottom: 24px;">Sign in with your 10BitWorks Authentik account to view and manage your door access key.</p>
+            <a href="/auth/login"><button class="btn-primary" style="font-size: 1.05rem; padding: 10px 24px;">Sign In with Authentik</button></a>
+        </div>
+
+        <!-- Authenticated Portal View -->
+        <div id="portal-content" style="display:none;">
+            <!-- Membership Card -->
+            <div class="card">
+                <h2>Membership Status</h2>
+                <div id="membership-details" class="grid">
+                    <!-- Populated via JS -->
+                </div>
+            </div>
+
+            <!-- Key Card Card -->
+            <div class="card">
+                <h2>Access Key Card</h2>
+                <div id="key-details">
+                    <!-- Populated via JS -->
+                </div>
+
+                <div id="pending-job-container"></div>
+
+                <div style="margin-top: 20px; display: flex; gap: 12px; align-items: center;" id="key-actions">
+                    <button id="btn-provision" class="btn-primary" onclick="provisionKey()">Tap to Enroll Replacement / New Card</button>
+                    <button id="btn-revoke" class="btn-danger" onclick="revokeKey()" style="display:none;">Revoke Active Card</button>
+                </div>
+            </div>
+
+            <!-- Recent Taps -->
+            <div class="card">
+                <h2>Recent Door Taps</h2>
+                <div style="overflow-x: auto;">
+                    <table id="taps-table">
+                        <thead>
+                            <tr>
+                                <th>Timestamp</th>
+                                <th>Device</th>
+                                <th>Decision</th>
+                                <th>Reason</th>
+                            </tr>
+                        </thead>
+                        <tbody id="taps-body">
+                            <tr><td colspan="4" style="text-align:center; color: var(--text-muted);">Loading recent activity...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentUser = null;
+        let countdownInterval = null;
+
+        function showAlert(msg, type = 'error') {
+            const container = document.getElementById('alert-container');
+            container.innerHTML = `<div class="alert alert-${type}">${msg}</div>`;
+        }
+
+        function clearAlert() {
+            document.getElementById('alert-container').innerHTML = '';
+        }
+
+        async function fetchStatus() {
+            try {
+                const res = await fetch('/me/api/status');
+                if (res.status === 401) {
+                    document.getElementById('login-section').style.display = 'block';
+                    document.getElementById('portal-content').style.display = 'none';
+                    document.getElementById('nav-user').innerHTML = '<a href="/auth/login"><button class="btn-primary">Sign In</button></a>';
+                    return;
+                }
+                if (!res.ok) {
+                    throw new Error('Failed to load status');
+                }
+                const data = await res.json();
+                renderPortal(data);
+                loadTaps();
+            } catch (err) {
+                showAlert('Error connecting to key portal: ' + err.message);
+            }
+        }
+
+        function renderPortal(data) {
+            currentUser = data.principal;
+            document.getElementById('login-section').style.display = 'none';
+            document.getElementById('portal-content').style.display = 'block';
+
+            // Nav header
+            const nav = document.getElementById('nav-user');
+            const isAdmin = currentUser.is_admin;
+            nav.innerHTML = `
+                <span><strong>${escapeHtml(currentUser.username)}</strong></span>
+                ${isAdmin ? '<a href="/admin"><span class="badge badge-admin">Admin Dashboard</span></a>' : ''}
+                <form action="/auth/logout" method="POST" style="margin:0; display:inline;">
+                    <button type="submit" class="btn-secondary" style="padding: 4px 10px; font-size: 0.85rem;">Logout</button>
+                </form>
+            `;
+
+            // Membership section
+            const memDiv = document.getElementById('membership-details');
+            if (data.membership) {
+                const m = data.membership;
+                const isActive = data.is_active;
+                memDiv.innerHTML = `
+                    <div>
+                        <div class="stat-label">Name</div>
+                        <div class="stat-value">${escapeHtml(m.display_name || m.member_key)}</div>
+                    </div>
+                    <div>
+                        <div class="stat-label">Member Key</div>
+                        <div class="stat-value"><code>${escapeHtml(m.member_key)}</code></div>
+                    </div>
+                    <div>
+                        <div class="stat-label">Access Status</div>
+                        <div class="stat-value">
+                            <span class="badge ${isActive ? 'badge-active' : 'badge-inactive'}">
+                                ${isActive ? 'Active Member' : 'Inactive / Expired'}
+                            </span>
+                        </div>
+                    </div>
+                    <div>
+                        <div class="stat-label">Active Until</div>
+                        <div class="stat-value">${escapeHtml(m.active_until || 'N/A')}</div>
+                    </div>
+                `;
+            } else {
+                memDiv.innerHTML = `
+                    <div style="grid-column: 1 / -1;" class="alert alert-warning">
+                        <strong>No membership record found</strong> for username <code>${escapeHtml(currentUser.username)}</code>.<br>
+                        Your Authentik account is recognized, but has not been synchronized into the membership roster. Please contact an onboarder.
+                    </div>
+                `;
+            }
+
+            // Key tag section
+            const keyDiv = document.getElementById('key-details');
+            const revokeBtn = document.getElementById('btn-revoke');
+            const provBtn = document.getElementById('btn-provision');
+
+            if (data.active_tag) {
+                const tag = data.active_tag;
+                keyDiv.innerHTML = `
+                    <div class="grid">
+                        <div>
+                            <div class="stat-label">Card UID</div>
+                            <div class="stat-value"><code>${escapeHtml(tag.uid)}</code></div>
+                        </div>
+                        <div>
+                            <div class="stat-label">Status</div>
+                            <div class="stat-value"><span class="badge badge-active">${escapeHtml(tag.status)}</span></div>
+                        </div>
+                        <div>
+                            <div class="stat-label">Key Version</div>
+                            <div class="stat-value">${escapeHtml(String(tag.key_version))}</div>
+                        </div>
+                        <div>
+                            <div class="stat-label">Enrolled At</div>
+                            <div class="stat-value">${escapeHtml(tag.enrolled_at)}</div>
+                        </div>
+                    </div>
+                `;
+                revokeBtn.style.display = 'inline-block';
+            } else {
+                keyDiv.innerHTML = `
+                    <p style="color: var(--text-muted); margin: 0 0 16px 0;">No active key card enrolled for your account.</p>
+                `;
+                revokeBtn.style.display = 'none';
+            }
+
+            // Provision button guard
+            if (!data.membership || !data.is_active) {
+                provBtn.disabled = true;
+                provBtn.title = "Membership must be active to provision a key card";
+            } else {
+                provBtn.disabled = false;
+                provBtn.title = "";
+            }
+
+            // Pending job section
+            renderPendingJob(data.pending_job);
+        }
+
+        function renderPendingJob(job) {
+            const container = document.getElementById('pending-job-container');
+            if (countdownInterval) {
+                clearInterval(countdownInterval);
+                countdownInterval = null;
+            }
+
+            if (!job) {
+                container.innerHTML = '';
+                return;
+            }
+
+            const expiresAt = new Date(job.expires_at).getTime();
+
+            function updateTimer() {
+                const now = Date.now();
+                const remaining = Math.max(0, Math.floor((expiresAt - now) / 1000));
+                const timerEl = document.getElementById('timer-count');
+                if (timerEl) {
+                    timerEl.textContent = remaining + 's';
+                }
+                if (remaining <= 0) {
+                    clearInterval(countdownInterval);
+                    countdownInterval = null;
+                    fetchStatus(); // Refresh when expired
+                }
+            }
+
+            container.innerHTML = `
+                <div class="countdown-box">
+                    <div style="font-weight: 600; color: #92400e;">Provisioning Armed — Tap Card at Any Writer Device</div>
+                    <div class="countdown-timer" id="timer-count">--s</div>
+                    <div style="font-size: 0.9rem; color: var(--text-muted);">
+                        Job ID: <code>${escapeHtml(job.job_id)}</code> | Tap your new or replacement NFC tag on any keygate writer.
+                    </div>
+                </div>
+            `;
+            updateTimer();
+            countdownInterval = setInterval(updateTimer, 1000);
+        }
+
+        async function provisionKey() {
+            clearAlert();
+            const btn = document.getElementById('btn-provision');
+            btn.disabled = true;
+            try {
+                const res = await fetch('/me/provision', { method: 'POST' });
+                const body = await res.json();
+                if (!res.ok) {
+                    throw new Error(body.error || 'Failed to arm provisioning job');
+                }
+                showAlert('Provisioning armed! Tap your card on any keygate writer within 60s.', 'info');
+                fetchStatus();
+            } catch (err) {
+                showAlert(err.message, 'error');
+                btn.disabled = false;
+            }
+        }
+
+        async function revokeKey() {
+            if (!confirm('Are you sure you want to revoke your active access card? You will lose door access immediately.')) {
+                return;
+            }
+            clearAlert();
+            try {
+                const res = await fetch('/me/revoke', { method: 'POST' });
+                const body = await res.json();
+                if (!res.ok) {
+                    throw new Error(body.error || 'Failed to revoke key');
+                }
+                showAlert('Active key card revoked.', 'info');
+                fetchStatus();
+                loadTaps();
+            } catch (err) {
+                showAlert(err.message, 'error');
+            }
+        }
+
+        async function loadTaps() {
+            const bodyEl = document.getElementById('taps-body');
+            try {
+                const res = await fetch('/me/api/taps');
+                if (!res.ok) return;
+                const taps = await res.json();
+                if (taps.length === 0) {
+                    bodyEl.innerHTML = '<tr><td colspan="4" style="text-align:center; color: var(--text-muted);">No recorded door taps.</td></tr>';
+                    return;
+                }
+                bodyEl.innerHTML = taps.map(t => `
+                    <tr>
+                        <td>${escapeHtml(t.ts)}</td>
+                        <td><code>${escapeHtml(t.device_id || 'unknown')}</code></td>
+                        <td>
+                            <span class="badge ${t.decision === 'granted' ? 'badge-active' : 'badge-inactive'}">
+                                ${escapeHtml(t.decision)}
+                            </span>
+                        </td>
+                        <td>${escapeHtml(t.reason)}</td>
+                    </tr>
+                `).join('');
+            } catch (e) {
+                bodyEl.innerHTML = '<tr><td colspan="4" style="text-align:center; color: red;">Error loading taps.</td></tr>';
+            }
+        }
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        fetchStatus();
+    </script>
+</body>
+</html>

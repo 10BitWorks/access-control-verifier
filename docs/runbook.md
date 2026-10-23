@@ -150,6 +150,11 @@ wildcard job, a member taps their blank tag on a writer-role KeyGate node, and
 the node writes the member's diversified key + SUN configuration over the air,
 then reports done. No PC/SC reader, no phone app.
 
+**Scanned NDEF URL** (firmware `ea1a182`, 2026-10-23): new keys carry
+`https://keys.10bitworks.org/?uid=&c=&cmac=` — a phone tap lands on the
+self-service portal (anonymous scans hit login, members land on `/me`).
+Previously keys carried the dead legacy `10bitworks.org/k` path.
+
 ### MQTT contract (writer protocol)
 
 | Topic (writer `{id}` = device id) | Direction | Payload |
@@ -264,7 +269,7 @@ The access verifier includes a self-service NFC key portal (`/me`) with Authenti
 
 ### Environment variables
 
-- `AUTHENTIK_ISSUER`: OIDC Issuer base URL (e.g. `https://auth.10bitworks.org`). Do **not** reuse `AUTHENTIK_URL` (which is the Authentik REST API base for member sync).
+- `AUTHENTIK_ISSUER`: OIDC per-app Issuer URL, e.g. `https://auth.10bitworks.org/application/o/keygate-portal/` (not the domain root — domain-level discovery 404s). Since 0.3.1 the ID-token `iss` check accepts the issuer with or without a trailing slash (`from_env` trims for URL construction; Authentik's token `iss` carries the slash). Do **not** reuse `AUTHENTIK_URL` (which is the Authentik REST API base for member sync).
 - `AUTHENTIK_CLIENT_ID`: Confidential OAuth2/OIDC Client ID.
 - `AUTHENTIK_CLIENT_SECRET`: Confidential OAuth2/OIDC Client Secret.
 - `PUBLIC_URL`: Publicly accessible base URL for the portal (e.g. `https://keys.10bitworks.org`). Redirect URI registered in Authentik must be `{PUBLIC_URL}/auth/callback`. Cookie `Secure` attribute is set when `PUBLIC_URL` begins with `https://`.
@@ -299,6 +304,36 @@ If OIDC environment variables are unset, portal routes render a "not configured"
   - **Replacement Semantics**: Tapping and enrolling a new key card automatically revokes any previous active tag for that member.
 - **Revocation (`POST /me/revoke`)**:
   - Revokes only active cards belonging to the logged-in member.
+
+### Production deployment (current)
+
+- **Host**: LXC on `10.7.1.25` (ssh alias `link-docker`), path
+  `/opt/access-control-verifier` — `compose.yaml` + `.env`, container
+  `access-control-verifier`, port `8001:8000`, volume `verifier-data`.
+- **Public URL**: `https://keys.10bitworks.org` — Nginx Proxy Manager container
+  on `10.7.1.241` (proxy host id 36 → `10.7.1.25:8001`, wildcard
+  `*.10bitworks.org` LE cert). Do **not** pin `extra_hosts` in compose to NPM tunnels:
+  the container must reach `auth.10bitworks.org` via the public edge, or it hits
+  NPM's own expired auth cert and discovery fails.
+- **Release flow**: tag `vX.Y.Z` in this repo → `docker.yml` publishes
+  `ghcr.io/10bitworks/access-control-verifier:X.Y.Z` → on prod swap the `image:`
+  tag in `compose.yaml` → `docker compose pull && docker compose up -d` → wait
+  for `(healthy)` in `docker ps`.
+- **Current image**: `0.3.1` (commits `17dd253` fix + `0b1f3a0` fmt, tag `v0.3.1`).
+
+### OIDC gotchas
+
+- **`ID token invalid: InvalidIssuer`** (fixed in 0.3.1): Authentik's ID token
+  `iss` carries the per-app path **with trailing slash**; the validator now
+  accepts both forms. Before 0.3.1 any env-vs-token slash mismatch failed at
+  callback.
+- **Provider grant types**: the Authentik provider must include
+  `authorization_code` (+ `refresh_token`); an empty `grant_types` list makes
+  authorize reject with "request is otherwise malformed".
+- **Password login**: members authenticate via passkey/Slack/Gmail in the
+  default flow; password login only exists in the `admin-login` flow
+  (policy-gated). For E2E testing, use a test user in `authentik Admins` +
+  `admin-login` flow, then remove the membership.
 
 ## Relocation Checklist
 

@@ -258,6 +258,48 @@ cp data/backup-YYYYMMDD.db data/access.db
 
 Register the verifier in Uptime Kuma to monitor the health endpoint: `GET /healthz`.
 
+## Self-service portal
+
+The access verifier includes a self-service NFC key portal (`/me`) with Authentik OIDC authentication.
+
+### Environment variables
+
+- `AUTHENTIK_ISSUER`: OIDC Issuer base URL (e.g. `https://auth.10bitworks.org`). Do **not** reuse `AUTHENTIK_URL` (which is the Authentik REST API base for member sync).
+- `AUTHENTIK_CLIENT_ID`: Confidential OAuth2/OIDC Client ID.
+- `AUTHENTIK_CLIENT_SECRET`: Confidential OAuth2/OIDC Client Secret.
+- `PUBLIC_URL`: Publicly accessible base URL for the portal (e.g. `https://keys.10bitworks.org`). Redirect URI registered in Authentik must be `{PUBLIC_URL}/auth/callback`. Cookie `Secure` attribute is set when `PUBLIC_URL` begins with `https://`.
+- `SESSION_SECRET`: Secret key for HMAC-SHA256 signing of the `keygate_session` JWT cookie.
+- `SESSION_LIFETIME_HOURS`: Cookie session duration in hours (defaults to `12`).
+- `ADMIN_ROLE`: Authentik role or group name granting access to the `/admin` dashboard (defaults to `Onboarders`).
+
+If OIDC environment variables are unset, portal routes render a "not configured" notice, and `/admin` continues functioning with bearer token authentication for backwards compatibility.
+
+### Authentik Application Requirements
+
+1. **Client Type**: Confidential.
+2. **Grant Type**: Authorization Code with PKCE (S256).
+3. **Redirect URI**: `{PUBLIC_URL}/auth/callback` (e.g. `https://keys.10bitworks.org/auth/callback`).
+4. **Scopes & Claims**:
+   - `openid`, `profile`, `email`.
+   - `preferred_username` claim in ID token matching `members.member_key`.
+   - `roles` (or `groups`) array claim in ID token.
+5. **Admin Access**:
+   - Users with `ADMIN_ROLE` (default `Onboarders`) in their `roles` or `groups` array can access `/admin` and `/admin/api/*` directly via browser session without needing a separate `ADMIN_BEARER_TOKEN`.
+   - Logged-in non-admin sessions hitting `/admin` receive a 403 Forbidden page rather than an authentication loop.
+
+### User Flow & Provisioning Policy
+
+- **Self-service URL**: `GET /` redirects to `GET /me`.
+- **Status Check**: Displays Authentik username, membership status (active/inactive and expiration date), current enrolled key card (UID, enrollment date, version — never raw key material), and recent door taps (last 25 for their UIDs).
+- **Tap-to-Enroll Provisioning (`POST /me/provision`)**:
+  - Arms a wildcard provisioning job for the member's account.
+  - **TTL**: Exactly 60 seconds with countdown UI.
+  - **Device Target**: Any keygate writer device (`device_id = "*"`). The job payload is published to all writer devices via MQTT, and binds to whichever device claims it on tap.
+  - **Guards**: Session required; member record must exist; member must be active under standard grace period rules; at most one active pending job per member at a time (409 Conflict if pending).
+  - **Replacement Semantics**: Tapping and enrolling a new key card automatically revokes any previous active tag for that member.
+- **Revocation (`POST /me/revoke`)**:
+  - Revokes only active cards belonging to the logged-in member.
+
 ## Relocation Checklist
 
 The service is fully containerized. Moving to a new location requires:

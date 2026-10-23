@@ -14,7 +14,13 @@
     </style>
 </head>
 <body>
-    <h1>Access Control Admin Dashboard</h1>
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+        <h1>Access Control Admin Dashboard</h1>
+        <div id="session-info" style="font-size: 0.9em; color: #475569;">
+            <a href="/me" style="color: #4f46e5; text-decoration: none; font-weight: 500;">&larr; Self-Service Key Portal</a>
+            <span id="whoami" style="margin-left: 12px;"></span>
+        </div>
+    </div>
     <div id="auth-banner" style="background: #eef2ff; border: 1px solid #c7d2fe; padding: 10px 15px; margin-bottom: 20px; border-radius: 6px; display: flex; align-items: center; gap: 10px;">
         <label for="admin-token-input" style="font-weight: bold; color: #3730a3;">Admin Token:</label>
         <input type="password" id="admin-token-input" placeholder="Bearer Token (e.g. admintest123)" style="flex: 1; max-width: 350px; padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 4px;">
@@ -369,6 +375,21 @@
             e.target.reset();
             load();
         };
+
+        // Check if session authenticated
+        async function checkSession() {
+            try {
+                const res = await fetch('/me/api/status');
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data && data.principal) {
+                        const whoami = document.getElementById('whoami');
+                        whoami.innerHTML = `Signed in as <strong>${data.principal.username}</strong> <span style="background:#e0e7ff; color:#4338ca; padding:2px 6px; border-radius:4px; font-size:0.8em;">Admin Session</span>`;
+                    }
+                }
+            } catch (e) {}
+        }
+        checkSession();
 
         load();
         loadProvSelects().catch(() => {});

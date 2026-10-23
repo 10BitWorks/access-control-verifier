@@ -23,22 +23,19 @@ pub fn router(state: AppState) -> Router {
         .route("/jobs", post(arm_job))
         .route("/jobs/pending", get(pending_jobs))
         .route("/jobs/{job_id}", delete(cancel_job))
-        .route(
-            "/overrides",
-            get(list_overrides).post(create_override),
-        )
+        .route("/overrides", get(list_overrides).post(create_override))
         .route("/audit", get(list_audit))
         .route("/sync-state", get(sync_state))
         .route("/sync", post(trigger_sync))
-        .route("/config", get(list_config).post(set_config))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth_middleware,
-        ));
+        .route("/config", get(list_config).post(set_config));
 
     Router::new()
         .route("/admin", get(admin_ui))
         .nest("/admin/api", api_routes)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
         .with_state(state)
 }
 
@@ -99,6 +96,53 @@ async fn auth_middleware(
             && !email.is_empty()
         {
             return next.run(req).await;
+        }
+    }
+
+    // 5. Check OIDC Portal session cookie
+    let session_secret = env::var("SESSION_SECRET")
+        .unwrap_or_else(|_| "insecure-dev-session-secret-change-me".to_string());
+    let admin_role = env::var("ADMIN_ROLE").unwrap_or_else(|_| "Onboarders".to_string());
+
+    if let Some(cookie_hdr) = headers.get(axum::http::header::COOKIE) {
+        if let Ok(cookie_str) = cookie_hdr.to_str() {
+            for cookie in cookie_str.split(';') {
+                let cookie = cookie.trim();
+                if let Some(val) =
+                    cookie.strip_prefix(&format!("{}=", crate::portal::SESSION_COOKIE_NAME))
+                {
+                    if let Some(principal) =
+                        crate::portal::verify_session_token(val, &session_secret, &admin_role)
+                    {
+                        if principal.is_admin() {
+                            return next.run(req).await;
+                        } else {
+                            // Logged-in non-admin gets a styled 403 on HTML or JSON error on API
+                            let is_html_req = req.uri().path() == "/admin";
+                            if is_html_req {
+                                return (
+                                    StatusCode::FORBIDDEN,
+                                    Html(r#"<!DOCTYPE html>
+<html>
+<head><title>403 Forbidden</title><style>body{font-family:sans-serif;margin:40px;line-height:1.5;}</style></head>
+<body>
+    <h1>403 Forbidden - Admin Access Required</h1>
+    <p>You are signed in as <strong>admin-restricted user</strong>, but your account lacks the required admin role.</p>
+    <p><a href="/me">Return to Self-Service Key Portal</a></p>
+</body>
+</html>"#),
+                                ).into_response();
+                            } else {
+                                return (
+                                    StatusCode::FORBIDDEN,
+                                    Json(json!({"error": "forbidden: admin role required"})),
+                                )
+                                    .into_response();
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

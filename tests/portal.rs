@@ -23,7 +23,13 @@ struct TestFixture {
     app: axum::Router,
     _db: NamedTempFile,
     store: Arc<Mutex<Store>>,
+    /// Held (never read) for the fixture's lifetime — see ENV_LOCK.
+    #[allow(dead_code)]
+    env_guard: std::sync::MutexGuard<'static, ()>,
 }
+
+/// See `TestFixture::env_guard`.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn create_session_cookie(username: &str, roles: Vec<String>) -> String {
     let now = chrono::Utc::now().timestamp() as usize;
@@ -44,6 +50,7 @@ fn create_session_cookie(username: &str, roles: Vec<String>) -> String {
 }
 
 fn setup_test_app() -> TestFixture {
+    let env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     unsafe {
         std::env::set_var("AUTHENTIK_ISSUER", "https://auth.example.com");
         std::env::set_var("AUTHENTIK_CLIENT_ID", "test-client-id");
@@ -73,6 +80,7 @@ fn setup_test_app() -> TestFixture {
         app,
         _db: db,
         store,
+        env_guard,
     }
 }
 
@@ -477,6 +485,7 @@ async fn setup_oidc_callback_mock(
     jwks_n: &str,
     jwks_kid: &str,
     token_kid: &str,
+    _env: &std::sync::MutexGuard<'static, ()>,
 ) -> OidcCallbackMock {
     let mock_server = MockServer::start().await;
     let issuer_url = mock_server.uri();
@@ -572,7 +581,8 @@ async fn test_oidc_callback_verifies_id_token_signature_via_jwks() {
     // JWKS cache would then serve the earlier scenario's keys.
     //
     // Happy path: JWKS serves the RSA key matching the token's kid.
-    let mock_ok = setup_oidc_callback_mock(RSA_KEY_A_N, "test-key-1", "test-key-1").await;
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mock_ok = setup_oidc_callback_mock(RSA_KEY_A_N, "test-key-1", "test-key-1", &_env).await;
 
     // CSRF state mismatch -> 400 before token exchange / verification
     let (status, _, _) = get_request(
@@ -603,7 +613,8 @@ async fn test_oidc_callback_verifies_id_token_signature_via_jwks() {
     );
 
     // Unknown kid: no JWKS key matches even after the forced refresh -> 401
-    let mock_kid_miss = setup_oidc_callback_mock(RSA_KEY_A_N, "test-key-1", "unknown-kid").await;
+    let mock_kid_miss =
+        setup_oidc_callback_mock(RSA_KEY_A_N, "test-key-1", "unknown-kid", &_env).await;
     let (status, body, _) = get_request(
         &mock_kid_miss.app,
         "/auth/callback?code=mock_code&state=test-csrf-state",
@@ -617,7 +628,8 @@ async fn test_oidc_callback_verifies_id_token_signature_via_jwks() {
         .contains("signing key not found"));
 
     // Wrong key: kid matches but the JWKS key did not sign the token -> 401
-    let mock_wrong_key = setup_oidc_callback_mock(RSA_KEY_B_N, "test-key-1", "test-key-1").await;
+    let mock_wrong_key =
+        setup_oidc_callback_mock(RSA_KEY_B_N, "test-key-1", "test-key-1", &_env).await;
     let (status, _, _) = get_request(
         &mock_wrong_key.app,
         "/auth/callback?code=mock_code&state=test-csrf-state",

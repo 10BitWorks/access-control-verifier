@@ -362,7 +362,15 @@ async fn verify_id_token(
     })?;
 
     let mut validation = Validation::new(Algorithm::RS256);
-    validation.iss = Some([cfg.issuer.clone()].into());
+    // Accept the issuer with and without a trailing slash: OIDC-issued `iss`
+    // values (Authentik's included) frequently carry it, while operators
+    // configure `AUTHENTIK_ISSUER` without one. `from_env` trims it for URL
+    // construction, so normalize both directions here.
+    validation.iss = Some([
+        cfg.issuer.clone(),
+        format!("{}/", cfg.issuer),
+    ]
+    .into());
     validation.aud = Some([cfg.client_id.clone()].into());
     validation.validate_exp = true;
 

@@ -574,6 +574,10 @@ async fn setup_oidc_callback_mock(
     }
 }
 
+// The std MutexGuard is deliberately held across the awaited mock setups —
+// it serializes env-sensitive fixtures (see ENV_LOCK); the only contention
+// is other tests' fast local-HTTP setups.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn test_oidc_callback_verifies_id_token_signature_via_jwks() {
     // All three mock servers stay alive for the whole test: dropping one

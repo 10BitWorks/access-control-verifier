@@ -4,8 +4,9 @@ title = "gitleaks config — access-control-verifier"
 useDefault = true
 
 [allowlist]
-description = "Deterministic AES/CMAC/MQTT test vectors in test fixtures — public test data, not secrets"
+description = "Deterministic AES/CMAC/RSA test vectors in test fixtures — public test data, not secrets"
 paths = [
     '''tests/crypto_vectors\.rs''',
     '''tests/mqtt\.rs''',
+    '''tests/portal\.rs''',
 ]

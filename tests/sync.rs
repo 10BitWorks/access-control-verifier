@@ -88,13 +88,14 @@ async fn test_sync_success_two_pages_three_users() {
     let store = open_store(&db_file);
 
     Mock::given(method("GET"))
-        .and(path("/api/v3/core/groups/status_current/users/"))
+        .and(path("/api/v3/core/users/"))
+        .and(query_param("groups_by_name", "status_current"))
         .and(query_param("page", "1"))
         .and(query_param("page_size", "100"))
         .and(header("Authorization", "Bearer test-token-123"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "pagination": {
-                "next": format!("{}/api/v3/core/groups/status_current/users/?page=2", mock_server.uri()),
+                "next": format!("{}/api/v3/core/users/?page=2", mock_server.uri()),
                 "previous": null,
                 "count": 3,
                 "current": 1,
@@ -109,14 +110,15 @@ async fn test_sync_success_two_pages_three_users() {
         .await;
 
     Mock::given(method("GET"))
-        .and(path("/api/v3/core/groups/status_current/users/"))
+        .and(path("/api/v3/core/users/"))
+        .and(query_param("groups_by_name", "status_current"))
         .and(query_param("page", "2"))
         .and(query_param("page_size", "100"))
         .and(header("Authorization", "Bearer test-token-123"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "pagination": {
                 "next": null,
-                "previous": format!("{}/api/v3/core/groups/status_current/users/?page=1", mock_server.uri()),
+                "previous": format!("{}/api/v3/core/users/?page=1", mock_server.uri()),
                 "count": 3,
                 "current": 2,
                 "total_pages": 2
@@ -237,7 +239,8 @@ async fn test_sync_removes_stale_authentik_members_only() {
     seed_member(&db_file, "manual_user", "manual");
 
     Mock::given(method("GET"))
-        .and(path("/api/v3/core/groups/status_current/users/"))
+        .and(path("/api/v3/core/users/"))
+        .and(query_param("groups_by_name", "status_current"))
         .and(query_param("page", "1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "pagination": { "next": null, "total_pages": 1, "current": 1 },

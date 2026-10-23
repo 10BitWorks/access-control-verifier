@@ -503,9 +503,20 @@ impl Store {
     /// semantics mirror `take_job`; the uid transition commits under an
     /// IMMEDIATE transaction so a concurrent claim observes the bound uid.
     pub fn claim_job(
-        &mut self,        job_id: &str,
+        &mut self,
+        job_id: &str,
         uid_hex: &str,
         now: &str,
+    ) -> rusqlite::Result<JobClaim> {
+        self.claim_job_on_device(job_id, uid_hex, now, "")
+    }
+
+    pub fn claim_job_on_device(
+        &mut self,
+        job_id: &str,
+        uid_hex: &str,
+        now: &str,
+        device: &str,
     ) -> rusqlite::Result<JobClaim> {
         let tx = self
             .conn
@@ -528,6 +539,17 @@ impl Store {
             .optional()?;
         let Some((uid, member_key, device_id, expires_at, consumed_at)) = row else {
             return Ok(JobClaim::NotFound);
+        };
+        // Wildcard device targeting ("*"): if job was created for wildcard device,
+        // bind the job to the claiming device upon first claim.
+        let device_id = if device_id == "*" {
+            tx.execute(
+                "UPDATE jobs SET device_id = ?1 WHERE job_id = ?2 AND device_id = '*'",
+                params![device, job_id],
+            )?;
+            device.to_string()
+        } else {
+            device_id
         };
         let job = JobRow {
             job_id: job_id.to_string(),
@@ -656,6 +678,14 @@ impl Store {
                 source: r.get(3)?,
             })
         })?;
+        rows.collect()
+    }
+
+    pub fn list_writer_devices(&self) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT device_id FROM devices WHERE role IN ('writer', 'both') ORDER BY device_id",
+        )?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
         rows.collect()
     }
 
@@ -788,6 +818,194 @@ impl Store {
             .conn
             .prepare("SELECT key, value FROM config ORDER BY key")?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
+    pub fn get_member(&self, member_key: &str) -> rusqlite::Result<Option<MemberInfo>> {
+        self.conn
+            .query_row(
+                "SELECT member_key, display_name, active_until, source
+                 FROM members WHERE member_key = ?1",
+                params![member_key],
+                |r| {
+                    Ok(MemberInfo {
+                        member_key: r.get(0)?,
+                        display_name: r.get(1)?,
+                        active_until: r.get(2)?,
+                        source: r.get(3)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    pub fn is_member_active(&self, member_key: &str, timestamp: &str) -> rusqlite::Result<bool> {
+        let override_row: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT kind FROM overrides 
+                 WHERE member_key = ?1 
+                   AND (expires_at IS NULL OR expires_at > ?2)
+                 ORDER BY id DESC LIMIT 1",
+                params![member_key, timestamp],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        if let Some(kind) = override_row {
+            if kind == "ban" {
+                return Ok(false);
+            } else if kind == "allow" {
+                return Ok(true);
+            }
+        }
+
+        let active_until: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT active_until FROM members WHERE member_key = ?1",
+                params![member_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let Some(au) = active_until else {
+            return Ok(false);
+        };
+
+        let grace_days = self
+            .get_config("grace_days")?
+            .unwrap_or_else(|| "5".to_string());
+        let grace_days: i64 = grace_days.parse().unwrap_or(5);
+
+        let is_within_grace: bool = self.conn.query_row(
+            "SELECT ?1 <= datetime(?2, '+' || ?3 || ' days')",
+            params![timestamp, au, grace_days],
+            |row| row.get(0),
+        )?;
+
+        Ok(is_within_grace)
+    }
+
+    pub fn get_active_tag_for_member(&self, member_key: &str) -> rusqlite::Result<Option<TagInfo>> {
+        self.conn
+            .query_row(
+                "SELECT uid, member_key, status, key_version, last_counter, enrolled_at
+                 FROM tags WHERE member_key = ?1 AND status = 'active'",
+                params![member_key],
+                |r| {
+                    Ok(TagInfo {
+                        uid: r.get(0)?,
+                        member_key: r.get(1)?,
+                        status: r.get(2)?,
+                        key_version: r.get(3)?,
+                        last_counter: r.get(4)?,
+                        enrolled_at: r.get(5)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    pub fn list_tags_for_member(&self, member_key: &str) -> rusqlite::Result<Vec<TagInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT uid, member_key, status, key_version, last_counter, enrolled_at
+             FROM tags WHERE member_key = ?1 ORDER BY enrolled_at DESC, uid",
+        )?;
+        let rows = stmt.query_map(params![member_key], |r| {
+            Ok(TagInfo {
+                uid: r.get(0)?,
+                member_key: r.get(1)?,
+                status: r.get(2)?,
+                key_version: r.get(3)?,
+                last_counter: r.get(4)?,
+                enrolled_at: r.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn revoke_active_tags_for_member(
+        &mut self,
+        member_key: &str,
+    ) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT uid FROM tags WHERE member_key = ?1 AND status = 'active'")?;
+        let uids: Vec<String> = stmt
+            .query_map(params![member_key], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+
+        if !uids.is_empty() {
+            self.conn.execute(
+                "UPDATE tags SET status = 'revoked' WHERE member_key = ?1 AND status = 'active'",
+                params![member_key],
+            )?;
+        }
+        Ok(uids)
+    }
+
+    pub fn pending_job_for_member(
+        &self,
+        member_key: &str,
+        now: &str,
+    ) -> rusqlite::Result<Option<PendingJobRow>> {
+        self.conn
+            .query_row(
+                "SELECT job_id, uid, member_key, device_id, created_at, expires_at
+                 FROM jobs
+                 WHERE member_key = ?1 AND consumed_at IS NULL AND expires_at > ?2
+                 ORDER BY created_at DESC LIMIT 1",
+                params![member_key, now],
+                |row| {
+                    Ok(PendingJobRow {
+                        job_id: row.get(0)?,
+                        uid: row.get(1)?,
+                        member_key: row.get(2)?,
+                        device_id: row.get(3)?,
+                        created_at: row.get(4)?,
+                        expires_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    pub fn list_audit_for_uids(
+        &self,
+        uids: &[String],
+        limit: u32,
+    ) -> rusqlite::Result<Vec<AuditInfo>> {
+        if uids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders: Vec<String> = (1..=uids.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT id, ts, device_id, uid, counter, decision, reason
+             FROM audit_log
+             WHERE uid IN ({})
+             ORDER BY id DESC LIMIT ?{}",
+            placeholders.join(","),
+            uids.len() + 1
+        );
+        let mut binds: Vec<rusqlite::types::Value> = uids
+            .iter()
+            .map(|u| rusqlite::types::Value::Text(u.clone()))
+            .collect();
+        binds.push(rusqlite::types::Value::Integer(i64::from(limit)));
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(binds), |r| {
+            Ok(AuditInfo {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                device_id: r.get(2)?,
+                uid: r.get(3)?,
+                counter: r.get(4)?,
+                decision: r.get(5)?,
+                reason: r.get(6)?,
+            })
+        })?;
         rows.collect()
     }
 
@@ -963,8 +1181,12 @@ mod tests {
     #[test]
     fn admin_enroll_path_enforces_replacement_too() {
         let mut store = open_mem();
-        store.enroll_tag("uid-a", "member-a", 1, "2026-10-15T00:00:00Z").unwrap();
-        store.enroll_tag("uid-b", "member-a", 1, "2026-10-15T01:00:00Z").unwrap();
+        store
+            .enroll_tag("uid-a", "member-a", 1, "2026-10-15T00:00:00Z")
+            .unwrap();
+        store
+            .enroll_tag("uid-b", "member-a", 1, "2026-10-15T01:00:00Z")
+            .unwrap();
         assert_eq!(status_of(&store, "uid-a"), "revoked");
         assert_eq!(status_of(&store, "uid-b"), "active");
     }

@@ -287,7 +287,9 @@ async fn del(app: &axum::Router, path: &str, token: Option<&str>) -> (StatusCode
     let req = builder.body(Body::empty()).unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
     let status = res.status();
-    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let body: Value = serde_json::from_slice(&bytes).unwrap_or(json!({}));
     (status, body)
 }
@@ -321,7 +323,12 @@ fn writer_fixture() -> Fixture {
 #[tokio::test]
 async fn test_pending_list_unknown_device_returns_empty_array() {
     let f = writer_fixture();
-    let (status, body) = get(&f.app, "/admin/api/jobs/pending?device=who-dis", Some("test-token")).await;
+    let (status, body) = get(
+        &f.app,
+        "/admin/api/jobs/pending?device=who-dis",
+        Some("test-token"),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!([]));
 }
@@ -350,7 +357,12 @@ async fn test_arm_and_cancel_wildcard_job() {
     assert_eq!(jobs[0]["uid"], json!(""));
 
     // Cancel marks the job consumed (fail_job audit job_failed).
-    let (status, body) = del(&f.app, &format!("/admin/api/jobs/{}", job_id), Some("test-token")).await;
+    let (status, body) = del(
+        &f.app,
+        &format!("/admin/api/jobs/{}", job_id),
+        Some("test-token"),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "cancel body: {}", body);
     assert_eq!(body["status"], json!("cancelled"));
 
@@ -359,7 +371,12 @@ async fn test_arm_and_cancel_wildcard_job() {
     assert_eq!(body, json!([]));
 
     // Second cancel: job already consumed -> 404.
-    let (status, _) = del(&f.app, &format!("/admin/api/jobs/{}", job_id), Some("test-token")).await;
+    let (status, _) = del(
+        &f.app,
+        &format!("/admin/api/jobs/{}", job_id),
+        Some("test-token"),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -397,9 +414,14 @@ async fn test_admin_page_renders_provisioning_section() {
     let req = builder.body(Body::empty()).unwrap();
     let res = f.app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let html = String::from_utf8_lossy(&bytes);
-    assert!(html.contains("id=\"provision\""), "provision section missing");
+    assert!(
+        html.contains("id=\"provision\""),
+        "provision section missing"
+    );
     assert!(html.contains("Arm writer"), "arm button missing");
     assert!(html.contains("/admin/api/jobs"), "arm endpoint missing");
 }

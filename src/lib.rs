@@ -2,6 +2,7 @@ pub mod admin;
 pub mod api;
 pub mod crypto;
 pub mod mqtt;
+pub mod portal;
 pub mod store;
 pub mod sync;
 pub mod writer;
@@ -15,7 +16,8 @@ pub fn app(state: api::AppState, writer: Option<Router>) -> Router {
     let mut router = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .merge(api::router(state.clone()))
-        .merge(admin::router(state));
+        .merge(admin::router(state.clone()))
+        .merge(portal::router(state));
     if let Some(writer) = writer {
         router = router.merge(writer);
     }

@@ -408,10 +408,7 @@ async fn cmd_publish_reaches_subscribed_reader() {
         .expect("publish received");
     assert_eq!(publish.topic, "access/door1/cmd");
     let payload: Value = serde_json::from_slice(&publish.payload).expect("payload is JSON");
-    assert_eq!(
-        payload,
-        json!({"grant": true, "reason": "ok"})
-    );
+    assert_eq!(payload, json!({"grant": true, "reason": "ok"}));
 
     sink_pump.abort();
     sub_pump.abort();

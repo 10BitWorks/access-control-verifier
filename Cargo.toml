@@ -32,7 +32,7 @@ anyhow = "1.0.95"
 thiserror = "2.0.11"
 chrono = "0.4.38"
 axum-extra = { version = "0.12.6", features = ["typed-header"] }
-jsonwebtoken = "11.1.0"
+jsonwebtoken = { version = "11.1.0", features = ["rust_crypto"] }
 cookie = { version = "0.18.2", features = ["signed"] }
 base64 = "0.23.1"
 

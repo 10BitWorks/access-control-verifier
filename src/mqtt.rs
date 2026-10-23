@@ -203,7 +203,7 @@ pub fn claim_and_build(
         Ok(s) => s,
         Err(_) => return None,
     };
-    match store.claim_job(job_id, uid_hex, now) {
+    match store.claim_job_on_device(job_id, uid_hex, now, device) {
         Ok(JobClaim::Claimed(job)) => {
             let key_hex = hex::encode(diversify(master, &uid).0);
             let payload = job_payload(&job.uid, &key_hex, &job.job_id, &job.expires_at);

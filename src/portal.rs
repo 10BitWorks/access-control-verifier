@@ -274,22 +274,22 @@ fn cached_jwks(url: &str) -> Option<JwkSet> {
     (cache.url == url && cache.fetched_at.elapsed() < JWKS_MAX_AGE).then(|| cache.keys.clone())
 }
 
-async fn fetch_jwks(state: &PortalState, url: &str) -> Result<JwkSet, Response> {
+async fn fetch_jwks(state: &PortalState, url: &str) -> Result<JwkSet, Box<Response>> {
     let keys: JwkSet = match state.http_client.get(url).send().await {
         Ok(res) if res.status().is_success() => match res.json().await {
             Ok(keys) => keys,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to parse JWKS");
-                return Err((StatusCode::BAD_GATEWAY, "JWKS parse error").into_response());
+                return Err(Box::new((StatusCode::BAD_GATEWAY, "JWKS parse error").into_response()));
             }
         },
         Ok(res) => {
             tracing::error!(status = %res.status(), "JWKS endpoint returned error");
-            return Err((StatusCode::BAD_GATEWAY, "JWKS fetch failed").into_response());
+            return Err(Box::new((StatusCode::BAD_GATEWAY, "JWKS fetch failed").into_response()));
         }
         Err(e) => {
             tracing::error!(error = %e, "Failed to reach JWKS endpoint");
-            return Err((StatusCode::BAD_GATEWAY, "Failed to reach JWKS endpoint").into_response());
+            return Err(Box::new((StatusCode::BAD_GATEWAY, "Failed to reach JWKS endpoint").into_response()));
         }
     };
     if let Ok(mut guard) = JWKS_CACHE.lock() {
@@ -320,7 +320,7 @@ async fn verify_id_token(
     cfg: &OidcConfig,
     jwks_uri: &str,
     id_token: &str,
-) -> Result<IdTokenClaims, Response> {
+) -> Result<IdTokenClaims, Box<Response>> {
     let header = jsonwebtoken::decode_header(id_token).map_err(|e| {
         tracing::warn!(error = %e, "ID token header decode failed");
         (
@@ -622,7 +622,7 @@ async fn auth_callback(
 
     let claims: IdTokenClaims = match verify_id_token(&state, cfg, jwks_uri, id_token_str).await {
         Ok(c) => c,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     // Validate Nonce

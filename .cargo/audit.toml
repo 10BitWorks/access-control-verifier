@@ -1,0 +1,21 @@
+# cargo-audit policy for access-control-verifier
+#
+# RUSTSEC-2023-0071 (rsa, Marvin Attack timing side channel): no fixed
+# upstream release exists. This service uses rsa ONLY for public-key
+# signature verification (JWKS/RS256 ID-token checks via jsonwebtoken);
+# the attack requires private-key operations on attacker-controlled
+# ciphertext, which we never perform. Ignored pending an upstream fix.
+[advisories]
+ignore = [
+    "RUSTSEC-2023-0071",
+    # rustls 0.22.4 is pinned by rumqttc 0.24 (0.22 branch is EOL; no
+    # in-branch fix). Used solely for the MQTT uplink to the internal
+    # broker over the trusted LAN. Tracked for a rumqttc upgrade;
+    # the fixed rustls 0.23 line is active for all other TLS users.
+    "RUSTSEC-2026-0346",
+    "RUSTSEC-2026-0349",
+    # rustls-webpki 0.102.8 rides the same rumqttc-pinned rustls 0.22
+    # branch (internal broker uplink only). The active TLS stack uses the
+    # fixed 0.103.16.
+    "RUSTSEC-2026-0382",
+]

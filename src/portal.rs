@@ -280,16 +280,22 @@ async fn fetch_jwks(state: &PortalState, url: &str) -> Result<JwkSet, Box<Respon
             Ok(keys) => keys,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to parse JWKS");
-                return Err(Box::new((StatusCode::BAD_GATEWAY, "JWKS parse error").into_response()));
+                return Err(Box::new(
+                    (StatusCode::BAD_GATEWAY, "JWKS parse error").into_response(),
+                ));
             }
         },
         Ok(res) => {
             tracing::error!(status = %res.status(), "JWKS endpoint returned error");
-            return Err(Box::new((StatusCode::BAD_GATEWAY, "JWKS fetch failed").into_response()));
+            return Err(Box::new(
+                (StatusCode::BAD_GATEWAY, "JWKS fetch failed").into_response(),
+            ));
         }
         Err(e) => {
             tracing::error!(error = %e, "Failed to reach JWKS endpoint");
-            return Err(Box::new((StatusCode::BAD_GATEWAY, "Failed to reach JWKS endpoint").into_response()));
+            return Err(Box::new(
+                (StatusCode::BAD_GATEWAY, "Failed to reach JWKS endpoint").into_response(),
+            ));
         }
     };
     if let Ok(mut guard) = JWKS_CACHE.lock() {

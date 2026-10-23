@@ -8,7 +8,7 @@ use axum::{
     body::Body,
     http::{header, HeaderMap, Request, StatusCode},
 };
-use jsonwebtoken::{EncodingKey, Header};
+use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tempfile::NamedTempFile;
@@ -411,8 +411,73 @@ async fn test_me_taps_filters_to_own_uids() {
     assert_eq!(taps[1]["uid"], "alice_tag");
 }
 
-#[tokio::test]
-async fn test_oidc_callback_flow_with_mock_server() {
+// ---------------------------------------------------------------------------
+// OIDC callback: ID-token signature verification via JWKS
+// ---------------------------------------------------------------------------
+
+// Test-only RSA key material (generated offline and embedded so tests need no
+// runtime keygen and no extra dev-dependencies). Key A signs the mock ID
+// tokens; RSA_KEY_B_N is an unrelated public modulus served by the JWKS mock
+// in the wrong-key scenario.
+const RSA_KEY_A_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDhJvJ47y9YtQFM
++3tfwVdqiWdCC4K1aysLWk5RzZtgDARy19BtCYQj9oHo7xdWYV6T0P73YdzvdA5w
+cUxUNTCvsMPxRyFa9V7GRBFaB4uBhSBlzfbHJ5Gq/UZE3yonUVyUhwNhWXkocY9X
+4g3zysQyrm75Ek3BztXw/3pzThzIgolMQGQ0hgB4AIlv7K65XmEBlLOcVUCypfHq
+9DLWuIbpMoRiRt3FUwn1VZ+SB2/S/idrfpCHqyZxFLBmPzp1tjXheZmyDuui5EnY
+vtSEN0A0c3kH06OP+HG0ylBPALg8+IOjnHEaaykdCWAX4mWMPDrOnIji0aa4jhpn
+0Q9w2KzvAgMBAAECggEAA5I6E1f74MTSNfXhMZYf/FUcmawUESuXfbEbf+mqdr4K
+DgZFTI1zlpxw2BB+xsR5mw+cE7FuLzAgkIEDjGxhjs/Xc8rEiSxOKgfnXI21FUNW
+zbaUHPmQMm2dATem9AOy27o+f/tK1Czk8Khpvz2umf0xTmsPZ60PsKhkuVJ6W2XL
+B7d0IIbAExfIUJp0pCClmaQCpwqmT4940yBTO2UYTBku4He0c/CXFTAE+dBXD6Hr
+TKjNaov3b3E30o09KFEwCyX/k0dEXVmEynfkNxChY0Zv6OFWDWtVha9rlcgYf8Hy
+NVWA3kJIZ9zPmn11MsDpT8eKpt2rtjNNlGQKBoIWdQKBgQD46omRQOccawwkSC/w
+ho6SR/mK5riJMf0abPnh0ZlmX0JDo79MIe8vqX7zworogaIdYeECS5FK7l7gC2gt
+3amMqnZkLsv0Dazo+TwuZJQwmQwakIUSAakPTAsFkrqbindhuF+h6ShlJicLd+xr
+oVVzZ2O3FD2QGoIpHtSpurwLPQKBgQDnj0dNG4wGsMLLQ2BUpn0giivlGEr9o2/7
+LWjteMn+IuDd87RJceD0FiBEK8K/OnYJphisUS+oL26y+2T5P235DCad/LZu/wTb
+pJs7IQeNOqlylQuZX6thqmSY4I30WEJXagP+aX8vTaRHQIPn4z1zYJvWgkcb8acG
+arIqt69LmwKBgDeEUAR2nlVHRuD8vLx/tmLH7M9fID9xR8tSDPWhwv4DNwtRBUSc
+uPU/b5I8jLDI4Ph+sSnK4u/8dGqyAJ1iOAOorVkw2spnFm6r0BFk22xvZjSykQtw
+FV3VDwxCKp6wZmoELkg1cY4F0WWMbM2goSdpIuNdf1GZp/g16SamAHTdAoGAQHfN
+fBQ9SeeQdBLQEQFBOPv++Ito5XDJTn74BZVpd02ymViuSvxfitVWKmSclazrDAio
+OeFoiUSbZ01CcXpNXdcaMUYYbJKngZc0eKPbfGBmqLYCQrM1/bz4wO9T1kF0Ru4H
+Kp+ofzz4jbXSg47qnuK4wGII9iizPcAa1nXJYh0CgYEAlZ0Yvg1DYAvpiv7Mt4g1
+i4UGj0QRvyecafNA230dIEAB0YTiPPsUv4lUsMsx27fFJ4ffejfWYqDgtSqsH84R
+4lz+lgkhv9EXf5blalDeO2fw8kMT8+8VhmrhUWZrO8pxugLCrsDuRlMBJZh41GOA
+L2LiJiU5CVUqSodH2eolcYI=
+-----END PRIVATE KEY-----";
+const RSA_KEY_A_N: &str = "4SbyeO8vWLUBTPt7X8FXaolnQguCtWsrC1pOUc2bYAwEctfQbQmEI_aB6O8XVmFek9D-92Hc73QOcHFMVDUwr7DD8UchWvVexkQRWgeLgYUgZc32xyeRqv1GRN8qJ1FclIcDYVl5KHGPV-IN88rEMq5u-RJNwc7V8P96c04cyIKJTEBkNIYAeACJb-yuuV5hAZSznFVAsqXx6vQy1riG6TKEYkbdxVMJ9VWfkgdv0v4na36Qh6smcRSwZj86dbY14XmZsg7rouRJ2L7UhDdANHN5B9Ojj_hxtMpQTwC4PPiDo5xxGmspHQlgF-JljDw6zpyI4tGmuI4aZ9EPcNis7w";
+const RSA_KEY_B_N: &str = "01RBFoEQdW9_ahFugOVK2rgMr03Lw6XmdFpSzEqjl_k0cVi25Eyxj9-hbuL7v1dC7UWleUSc5I9uv6qNU16xW7X6QhbkaU9SlSjcdjRmMrGPgWmWn2FYY4vnrjHyy95Cr1aQVV_pSW4jH9oFY7dUPRxbeDdCWQj0wzgWBO2gKO7PDYEfUSNILWqMVfCDSj1vHubVimmF_OGRaM9LlHBY7vPUdObqNlfQE_sILBerqGhC48pAVNUO2Gyo4GlKQCWe_zQlf84wDlw8CTTQtPii56mOmSGCs1LG4kys7g3smZXn__G05USvnWnxtpMxgfvKg5GNC2n9Jdwag4vx1A-GFQ";
+
+fn sign_rs256_id_token(pem: &str, kid: &str, claims: &Value) -> String {
+    jsonwebtoken::encode(
+        &Header {
+            alg: Algorithm::RS256,
+            kid: Some(kid.to_string()),
+            ..Default::default()
+        },
+        claims,
+        &EncodingKey::from_rsa_pem(pem.as_bytes()).unwrap(),
+    )
+    .unwrap()
+}
+
+struct OidcCallbackMock {
+    app: axum::Router,
+    _db: NamedTempFile,
+    _server: MockServer,
+    flow_cookie: String,
+}
+
+/// Mock OIDC issuer whose token endpoint returns an RS256 ID token signed by
+/// key A (with `token_kid`), and whose JWKS endpoint serves a single key with
+/// kid `jwks_kid` and modulus `jwks_n`.
+async fn setup_oidc_callback_mock(
+    jwks_n: &str,
+    jwks_kid: &str,
+    token_kid: &str,
+) -> OidcCallbackMock {
     let mock_server = MockServer::start().await;
     let issuer_url = mock_server.uri();
 
@@ -436,7 +501,7 @@ async fn test_oidc_callback_flow_with_mock_server() {
         .mount(&mock_server)
         .await;
 
-    // Create an unverified ID token with RS256 / HS256 claims
+    // RS256-signed ID token (iss/aud/exp/nonce match the mock issuer & flow)
     let id_token_claims = json!({
         "iss": issuer_url,
         "aud": "mock-client-id",
@@ -445,12 +510,7 @@ async fn test_oidc_callback_flow_with_mock_server() {
         "preferred_username": "mock_alice",
         "roles": ["Onboarders"]
     });
-    let id_token = jsonwebtoken::encode(
-        &Header::default(),
-        &id_token_claims,
-        &EncodingKey::from_secret(b"dummy-key"),
-    )
-    .unwrap();
+    let id_token = sign_rs256_id_token(RSA_KEY_A_PEM, token_kid, &id_token_claims);
 
     // Token endpoint mock
     Mock::given(method("POST"))
@@ -459,6 +519,22 @@ async fn test_oidc_callback_flow_with_mock_server() {
             "access_token": "mock-access-token",
             "token_type": "Bearer",
             "id_token": id_token,
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // JWKS endpoint mock
+    Mock::given(method("GET"))
+        .and(path("/jwks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "keys": [{
+                "kty": "RSA",
+                "use": "sig",
+                "alg": "RS256",
+                "kid": jwks_kid,
+                "n": jwks_n,
+                "e": "AQAB",
+            }]
         })))
         .mount(&mock_server)
         .await;
@@ -474,29 +550,44 @@ async fn test_oidc_callback_flow_with_mock_server() {
     };
     let app = access_control_verifier::app(state, None);
 
-    // Setup flow cookie
     let flow_json = json!({
         "pkce_verifier": "test_pkce_verifier_string_12345678901234567890",
         "csrf_token": "test-csrf-state",
         "nonce": "test-nonce-123",
     })
     .to_string();
-    let flow_cookie = format!("{OIDC_COOKIE_NAME}={flow_json}");
 
-    // Test callback CSRF mismatch -> 400
+    OidcCallbackMock {
+        app,
+        _db: db,
+        _server: mock_server,
+        flow_cookie: format!("{OIDC_COOKIE_NAME}={flow_json}"),
+    }
+}
+
+#[tokio::test]
+async fn test_oidc_callback_verifies_id_token_signature_via_jwks() {
+    // All three mock servers stay alive for the whole test: dropping one
+    // could let a later MockServer::start reuse its port, and the URL-keyed
+    // JWKS cache would then serve the earlier scenario's keys.
+    //
+    // Happy path: JWKS serves the RSA key matching the token's kid.
+    let mock_ok = setup_oidc_callback_mock(RSA_KEY_A_N, "test-key-1", "test-key-1").await;
+
+    // CSRF state mismatch -> 400 before token exchange / verification
     let (status, _, _) = get_request(
-        &app,
+        &mock_ok.app,
         "/auth/callback?code=mock_code&state=wrong-state",
-        Some(&flow_cookie),
+        Some(&mock_ok.flow_cookie),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    // Test callback happy path -> 303 Redirect to /me with session cookie
+    // Valid signature -> 303 redirect to /me with session cookie set
     let (status, _, headers) = get_request(
-        &app,
+        &mock_ok.app,
         "/auth/callback?code=mock_code&state=test-csrf-state",
-        Some(&flow_cookie),
+        Some(&mock_ok.flow_cookie),
     )
     .await;
     assert_eq!(status, StatusCode::SEE_OTHER);
@@ -510,4 +601,28 @@ async fn test_oidc_callback_flow_with_mock_server() {
         has_session_cookie,
         "session cookie should be set in headers"
     );
+
+    // Unknown kid: no JWKS key matches even after the forced refresh -> 401
+    let mock_kid_miss = setup_oidc_callback_mock(RSA_KEY_A_N, "test-key-1", "unknown-kid").await;
+    let (status, body, _) = get_request(
+        &mock_kid_miss.app,
+        "/auth/callback?code=mock_code&state=test-csrf-state",
+        Some(&mock_kid_miss.flow_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(body["raw"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("signing key not found"));
+
+    // Wrong key: kid matches but the JWKS key did not sign the token -> 401
+    let mock_wrong_key = setup_oidc_callback_mock(RSA_KEY_B_N, "test-key-1", "test-key-1").await;
+    let (status, _, _) = get_request(
+        &mock_wrong_key.app,
+        "/auth/callback?code=mock_code&state=test-csrf-state",
+        Some(&mock_wrong_key.flow_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }

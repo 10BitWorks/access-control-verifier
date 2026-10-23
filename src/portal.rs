@@ -8,7 +8,10 @@ use axum::{
     Json, Router,
 };
 use cookie::Cookie;
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{
+    jwk::{AlgorithmParameters, Jwk, JwkSet, PublicKeyUse},
+    Algorithm, DecodingKey, EncodingKey, Header, Validation,
+};
 use oauth2::{
     basic::{
         BasicErrorResponse, BasicRevocationErrorResponse, BasicTokenIntrospectionResponse,
@@ -21,6 +24,8 @@ use oauth2::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::env;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 pub const SESSION_COOKIE_NAME: &str = "keygate_session";
 pub const OIDC_COOKIE_NAME: &str = "keygate_oidc_flow";
@@ -66,7 +71,7 @@ impl OidcConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(12);
-        let admin_role = env::var("ADMIN_ROLE").unwrap_or_else(|_| "Onboarders".to_string());
+        let admin_role = env::var("ADMIN_ROLE").unwrap_or_else(|_| "Onboarder".to_string());
 
         Some(Self {
             issuer,
@@ -196,7 +201,6 @@ impl FromRef<PortalState> for Option<OidcConfig> {
 struct OpenIdConfig {
     authorization_endpoint: String,
     token_endpoint: String,
-    #[allow(dead_code)]
     #[serde(default)]
     jwks_uri: Option<String>,
 }
@@ -239,9 +243,8 @@ struct OidcFlowCookie {
 
 #[derive(Debug, Deserialize)]
 struct IdTokenClaims {
-    iss: String,
-    aud: serde_json::Value,
-    exp: usize,
+    // iss/aud/exp are not fields here: they are enforced by `Validation`
+    // inside `verify_id_token`; unknown claims are ignored on deserialize.
     #[serde(default)]
     nonce: Option<String>,
     #[serde(default)]
@@ -250,6 +253,120 @@ struct IdTokenClaims {
     roles: Option<Vec<String>>,
     #[serde(default)]
     groups: Option<Vec<String>>,
+}
+
+/// Cached JWKS document plus its endpoint URL and fetch time.
+struct JwksCache {
+    url: String,
+    keys: JwkSet,
+    fetched_at: Instant,
+}
+
+/// Process-wide JWKS cache; entries are refetched when older than
+/// [`JWKS_MAX_AGE`] or when a token references an unknown `kid`.
+static JWKS_CACHE: Mutex<Option<JwksCache>> = Mutex::new(None);
+
+const JWKS_MAX_AGE: Duration = Duration::from_secs(3600);
+
+fn cached_jwks(url: &str) -> Option<JwkSet> {
+    let guard = JWKS_CACHE.lock().ok()?;
+    let cache = guard.as_ref()?;
+    (cache.url == url && cache.fetched_at.elapsed() < JWKS_MAX_AGE).then(|| cache.keys.clone())
+}
+
+async fn fetch_jwks(state: &PortalState, url: &str) -> Result<JwkSet, Response> {
+    let keys: JwkSet = match state.http_client.get(url).send().await {
+        Ok(res) if res.status().is_success() => match res.json().await {
+            Ok(keys) => keys,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to parse JWKS");
+                return Err((StatusCode::BAD_GATEWAY, "JWKS parse error").into_response());
+            }
+        },
+        Ok(res) => {
+            tracing::error!(status = %res.status(), "JWKS endpoint returned error");
+            return Err((StatusCode::BAD_GATEWAY, "JWKS fetch failed").into_response());
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to reach JWKS endpoint");
+            return Err((StatusCode::BAD_GATEWAY, "Failed to reach JWKS endpoint").into_response());
+        }
+    };
+    if let Ok(mut guard) = JWKS_CACHE.lock() {
+        *guard = Some(JwksCache {
+            url: url.to_string(),
+            keys: keys.clone(),
+            fetched_at: Instant::now(),
+        });
+    }
+    Ok(keys)
+}
+
+/// Pick the RSA signing key matching the token's `kid` (any RSA signing key
+/// when the token header omits `kid`).
+fn signing_jwk<'a>(keys: &'a JwkSet, kid: Option<&str>) -> Option<&'a Jwk> {
+    keys.keys.iter().find(|jwk| {
+        matches!(jwk.algorithm, AlgorithmParameters::RSA(_))
+            && jwk.common.public_key_use != Some(PublicKeyUse::Encryption)
+            && kid.is_none_or(|k| jwk.common.key_id.as_deref() == Some(k))
+    })
+}
+
+/// Verify an OIDC ID token's RS256 signature against the issuer's JWKS and
+/// enforce iss/aud/exp via `Validation`. On an unknown `kid`, refreshes the
+/// JWKS once (key rollover) before failing.
+async fn verify_id_token(
+    state: &PortalState,
+    cfg: &OidcConfig,
+    jwks_uri: &str,
+    id_token: &str,
+) -> Result<IdTokenClaims, Response> {
+    let header = jsonwebtoken::decode_header(id_token).map_err(|e| {
+        tracing::warn!(error = %e, "ID token header decode failed");
+        (
+            StatusCode::UNAUTHORIZED,
+            format!("ID token header invalid: {e}"),
+        )
+            .into_response()
+    })?;
+
+    let keys = match cached_jwks(jwks_uri) {
+        Some(keys) => keys,
+        None => fetch_jwks(state, jwks_uri).await?,
+    };
+
+    let kid = header.kid.as_deref();
+    let mut jwk = signing_jwk(&keys, kid).cloned();
+    if jwk.is_none() {
+        // Unknown or missing kid: force one JWKS refresh (key rollover) and retry.
+        let keys = fetch_jwks(state, jwks_uri).await?;
+        jwk = signing_jwk(&keys, kid).cloned();
+    }
+    let jwk = jwk.ok_or(
+        (
+            StatusCode::UNAUTHORIZED,
+            "ID token signing key not found in JWKS",
+        )
+            .into_response(),
+    )?;
+
+    let decoding_key = DecodingKey::from_jwk(&jwk).map_err(|e| {
+        tracing::warn!(error = %e, "JWK to decoding key conversion failed");
+        (StatusCode::UNAUTHORIZED, "ID token signing key invalid").into_response()
+    })?;
+
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.iss = Some([cfg.issuer.clone()].into());
+    validation.aud = Some([cfg.client_id.clone()].into());
+    validation.validate_exp = true;
+
+    let token_data = jsonwebtoken::decode::<IdTokenClaims>(id_token, &decoding_key, &validation)
+        .map_err(|e| {
+            tracing::warn!(error = %e, "ID token validation failed");
+            (StatusCode::UNAUTHORIZED, format!("ID token invalid: {e}")).into_response()
+        })?;
+
+    Ok(token_data.claims)
 }
 
 pub fn router(app_state: AppState) -> Router {
@@ -493,42 +610,24 @@ async fn auth_callback(
         }
     };
 
-    // Decode ID token payload claims
-    let claims: IdTokenClaims = match jsonwebtoken::dangerous::insecure_decode_claims(id_token_str)
-    {
+    // Verify ID token signature via the issuer's JWKS; iss/aud/exp are
+    // enforced by `Validation` inside verify_id_token.
+    let Some(jwks_uri) = discovery.jwks_uri.as_deref() else {
+        return (
+            StatusCode::BAD_GATEWAY,
+            "Discovery document missing jwks_uri",
+        )
+            .into_response();
+    };
+
+    let claims: IdTokenClaims = match verify_id_token(&state, cfg, jwks_uri, id_token_str).await {
         Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "ID token claims decoding failed");
-            return (StatusCode::UNAUTHORIZED, format!("ID token invalid: {e}")).into_response();
-        }
+        Err(resp) => return resp,
     };
-
-    // Validate Issuer
-    let expected_issuer = cfg.issuer.trim_end_matches('/');
-    let actual_issuer = claims.iss.trim_end_matches('/');
-    if actual_issuer != expected_issuer {
-        return (StatusCode::UNAUTHORIZED, "ID token issuer mismatch").into_response();
-    }
-
-    // Validate Audience
-    let aud_match = match &claims.aud {
-        serde_json::Value::String(s) => s == &cfg.client_id,
-        serde_json::Value::Array(arr) => arr.iter().any(|v| v.as_str() == Some(&cfg.client_id)),
-        _ => false,
-    };
-    if !aud_match {
-        return (StatusCode::UNAUTHORIZED, "ID token audience mismatch").into_response();
-    }
 
     // Validate Nonce
     if claims.nonce.as_deref() != Some(&flow.nonce) {
         return (StatusCode::UNAUTHORIZED, "ID token nonce mismatch").into_response();
-    }
-
-    // Validate Expiration
-    let now_ts = chrono::Utc::now().timestamp() as usize;
-    if claims.exp < now_ts {
-        return (StatusCode::UNAUTHORIZED, "ID token expired").into_response();
     }
 
     // Extract preferred_username
@@ -544,6 +643,7 @@ async fn auth_callback(
     let roles = claims.roles.or(claims.groups).unwrap_or_default();
 
     // Create session JWT
+    let now_ts = chrono::Utc::now().timestamp() as usize;
     let exp = now_ts + (cfg.session_lifetime_hours as usize * 3600);
     let session_claims = SessionClaims {
         sub: username.clone(),

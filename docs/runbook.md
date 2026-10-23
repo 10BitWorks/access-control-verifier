@@ -270,7 +270,7 @@ The access verifier includes a self-service NFC key portal (`/me`) with Authenti
 - `PUBLIC_URL`: Publicly accessible base URL for the portal (e.g. `https://keys.10bitworks.org`). Redirect URI registered in Authentik must be `{PUBLIC_URL}/auth/callback`. Cookie `Secure` attribute is set when `PUBLIC_URL` begins with `https://`.
 - `SESSION_SECRET`: Secret key for HMAC-SHA256 signing of the `keygate_session` JWT cookie.
 - `SESSION_LIFETIME_HOURS`: Cookie session duration in hours (defaults to `12`).
-- `ADMIN_ROLE`: Authentik role or group name granting access to the `/admin` dashboard (defaults to `Onboarders`).
+- `ADMIN_ROLE`: Authentik role or group name granting access to the `/admin` dashboard (defaults to `Onboarder`).
 
 If OIDC environment variables are unset, portal routes render a "not configured" notice, and `/admin` continues functioning with bearer token authentication for backwards compatibility.
 
@@ -284,7 +284,7 @@ If OIDC environment variables are unset, portal routes render a "not configured"
    - `preferred_username` claim in ID token matching `members.member_key`.
    - `roles` (or `groups`) array claim in ID token.
 5. **Admin Access**:
-   - Users with `ADMIN_ROLE` (default `Onboarders`) in their `roles` or `groups` array can access `/admin` and `/admin/api/*` directly via browser session without needing a separate `ADMIN_BEARER_TOKEN`.
+   - Users with `ADMIN_ROLE` (default `Onboarder`) in their `roles` or `groups` array can access `/admin` and `/admin/api/*` directly via browser session without needing a separate `ADMIN_BEARER_TOKEN`.
    - Logged-in non-admin sessions hitting `/admin` receive a 403 Forbidden page rather than an authentication loop.
 
 ### User Flow & Provisioning Policy

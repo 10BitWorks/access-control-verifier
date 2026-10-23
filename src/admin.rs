@@ -9,6 +9,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 use std::env;
+use subtle::ConstantTimeEq;
 
 use crate::api::AppState;
 
@@ -84,6 +85,7 @@ async fn auth_middleware(
     }
 
     // 4. Check trusted proxy header only if PROXY_AUTH_SECRET is configured and matches
+    // WARNING: grants admin to ANY forwarded email when enabled — only for Authentik-forward-auth topologies; leave PROXY_AUTH_SECRET unset unless that is intended.
     if let (Some(email), Some(secret_hdr)) = (
         headers
             .get("x-authentik-email")
@@ -92,7 +94,7 @@ async fn auth_middleware(
     ) {
         let expected_secret = env::var("PROXY_AUTH_SECRET").unwrap_or_default();
         if !expected_secret.is_empty()
-            && secret_hdr.as_bytes() == expected_secret.as_bytes()
+            && bool::from(secret_hdr.as_bytes().ct_eq(expected_secret.as_bytes()))
             && !email.is_empty()
         {
             return next.run(req).await;
@@ -102,7 +104,7 @@ async fn auth_middleware(
     // 5. Check OIDC Portal session cookie
     let session_secret = env::var("SESSION_SECRET")
         .unwrap_or_else(|_| "insecure-dev-session-secret-change-me".to_string());
-    let admin_role = env::var("ADMIN_ROLE").unwrap_or_else(|_| "Onboarders".to_string());
+    let admin_role = env::var("ADMIN_ROLE").unwrap_or_else(|_| "Onboarder".to_string());
 
     if let Some(cookie_hdr) = headers.get(axum::http::header::COOKIE) {
         if let Ok(cookie_str) = cookie_hdr.to_str() {

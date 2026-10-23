@@ -69,7 +69,11 @@ fn setup_test_app() -> TestFixture {
 
     let app = access_control_verifier::app(state, None);
 
-    TestFixture { app, _db: db, store }
+    TestFixture {
+        app,
+        _db: db,
+        store,
+    }
 }
 
 async fn get_request(

@@ -756,6 +756,9 @@ async fn me_status(
     let pending_job = store
         .pending_job_for_member(&principal.username, &now)
         .unwrap_or(None);
+    let latest_job = store
+        .latest_job_for_member(&principal.username)
+        .unwrap_or(None);
 
     (
         StatusCode::OK,
@@ -765,6 +768,7 @@ async fn me_status(
             "is_active": is_active,
             "active_tag": active_tag,
             "pending_job": pending_job,
+            "latest_job": latest_job,
         })),
     )
         .into_response()

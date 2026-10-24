@@ -3,163 +3,416 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>10BitWorks - My Key Card</title>
+    <title>10BitWorks — Key Card Management</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
         :root {
-            --primary: #4f46e5;
-            --primary-hover: #4338ca;
-            --bg: #f8fafc;
-            --card-bg: #ffffff;
-            --text: #0f172a;
-            --text-muted: #64748b;
-            --border: #e2e8f0;
-            --danger: #dc2626;
-            --danger-hover: #b91c1c;
-            --success: #16a34a;
-            --warning: #d97706;
+            /* 10BitWorks Blueprint System tokens */
+            --primary: #C9952A;          /* Dark Brass */
+            --primary-hover: #B8861F;
+            --primary-pressed: #A87A1F;
+            --secondary: #3A5A7C;        /* Draft Blue */
+            --tertiary: #8B3A2A;         /* Anvil Red */
+            --neutral: #F5F0E6;          /* Blueprint Linen ground */
+            --surface: #FFFFFF;          /* Card surface */
+            --surface-dark: #302922;     /* Shop Dark */
+            --on-surface: #1A1A1A;       /* Carbon Black */
+            --on-surface-muted: #6E655B; /* Cinder */
+            --on-surface-dark: #F5F0E6;
+            --on-surface-dark-muted: #BDB6A7;
+            --outline: #D1D1D1;          /* Light Gray */
+
+            --font-display: 'Barlow Condensed', sans-serif;
+            --font-body: 'Barlow', sans-serif;
+            --font-mono: 'JetBrains Mono', monospace;
         }
+
+        * {
+            box-sizing: border-box;
+        }
+
         body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background: var(--bg);
-            color: var(--text);
+            font-family: var(--font-body);
+            font-size: 17px;
+            line-height: 1.6;
+            background-color: var(--neutral);
+            color: var(--on-surface);
             margin: 0;
-            padding: 24px;
+            padding: 32px 16px;
+            -webkit-font-smoothing: antialiased;
         }
+
         .container {
-            max-width: 800px;
+            max-width: 860px;
             margin: 0 auto;
         }
+
+        /* Top Blueprint Header */
         header {
             display: flex;
             justify-content: space-between;
-            align-items: center;
-            margin-bottom: 24px;
-            border-bottom: 1px solid var(--border);
+            align-items: flex-end;
+            margin-bottom: 28px;
+            border-bottom: 2px solid var(--on-surface);
             padding-bottom: 16px;
         }
-        h1 { margin: 0; font-size: 1.5rem; }
+
+        .brand-block {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .ref-kicker {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            letter-spacing: 2px;
+            color: var(--primary);
+            text-transform: uppercase;
+            font-weight: 500;
+            margin-bottom: 4px;
+        }
+
+        h1 {
+            font-family: var(--font-display);
+            font-size: clamp(2rem, 4vw, 2.75rem);
+            font-weight: 700;
+            line-height: 1;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+            margin: 0;
+            color: var(--on-surface);
+        }
+
+        h1 .dot {
+            color: var(--primary);
+        }
+
         .user-nav {
             display: flex;
             align-items: center;
             gap: 12px;
+            font-family: var(--font-display);
+            font-size: 15px;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
         }
+
+        /* Badges */
         .badge {
             display: inline-block;
             padding: 3px 8px;
-            border-radius: 9999px;
-            font-size: 0.75rem;
-            font-weight: 600;
+            font-family: var(--font-display);
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            border-radius: 2px;
         }
-        .badge-active { background: #dcfce7; color: #15803d; }
-        .badge-inactive { background: #fee2e2; color: #b91c1c; }
-        .badge-admin { background: #e0e7ff; color: #4338ca; }
+        .badge-active {
+            background: var(--secondary);
+            color: var(--neutral);
+        }
+        .badge-inactive {
+            background: var(--tertiary);
+            color: var(--neutral);
+        }
+        .badge-admin {
+            background: var(--surface-dark);
+            color: var(--primary);
+            border: 1px solid var(--primary);
+        }
+
+        /* Cards */
         .card {
-            background: var(--card-bg);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 20px;
+            background: var(--surface);
+            border: 1px solid var(--outline);
+            border-radius: 4px;
+            padding: 24px;
             margin-bottom: 24px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+            box-shadow: none; /* Blueprint System is strictly flat */
         }
-        h2 {
-            margin-top: 0;
-            font-size: 1.2rem;
-            border-bottom: 1px solid var(--border);
-            padding-bottom: 8px;
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
             margin-bottom: 16px;
+            border-bottom: 1px solid var(--outline);
+            padding-bottom: 10px;
         }
+
+        h2 {
+            font-family: var(--font-display);
+            font-size: 1.5rem;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            margin: 0;
+            color: var(--on-surface);
+        }
+
+        .card-ref {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            letter-spacing: 2px;
+            color: var(--on-surface-muted);
+            text-transform: uppercase;
+        }
+
+        /* Data Grids */
         .grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
             gap: 16px;
-            margin-bottom: 16px;
+            margin-bottom: 12px;
         }
+
+        .stat-item {
+            display: flex;
+            flex-direction: column;
+        }
+
         .stat-label {
-            font-size: 0.85rem;
-            color: var(--text-muted);
+            font-family: var(--font-display);
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--on-surface-muted);
             margin-bottom: 4px;
         }
+
         .stat-value {
-            font-size: 1.1rem;
-            font-weight: 600;
-        }
-        button {
-            padding: 8px 16px;
-            border-radius: 6px;
-            border: none;
+            font-family: var(--font-body);
+            font-size: 1.15rem;
             font-weight: 500;
-            cursor: pointer;
-            transition: background 0.15s;
+            color: var(--on-surface);
         }
-        .btn-primary { background: var(--primary); color: white; }
-        .btn-primary:hover { background: var(--primary-hover); }
-        .btn-danger { background: var(--danger); color: white; }
-        .btn-danger:hover { background: var(--danger-hover); }
-        .btn-secondary { background: #e2e8f0; color: var(--text); }
-        .btn-secondary:hover { background: #cbd5e1; }
-        button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .stat-value code {
+            font-family: var(--font-mono);
+            font-size: 0.95rem;
+            background: #ECE6DA;
+            padding: 2px 6px;
+            border-radius: 2px;
+        }
+
+        /* Buttons (10BitWorks Contract) */
+        button, .btn {
+            font-family: var(--font-display);
+            font-size: 16px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            padding: 9px 24px;
+            border-radius: 0px; /* Rectilinear square */
+            cursor: pointer;
+            transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            border: none;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: var(--on-surface);
+        }
+        .btn-primary:hover:not(:disabled) {
+            background: var(--primary-hover);
+        }
+        .btn-primary:active:not(:disabled) {
+            background: var(--primary-pressed);
+        }
+        .btn-primary:disabled {
+            background: var(--outline);
+            color: var(--on-surface-muted);
+            cursor: not-allowed;
+        }
+
+        .btn-outline {
+            background: transparent;
+            color: var(--on-surface);
+            border: 2px solid var(--on-surface-muted);
+        }
+        .btn-outline:hover:not(:disabled) {
+            background: var(--on-surface);
+            color: var(--neutral);
+            border-color: var(--on-surface);
+        }
+
+        .btn-danger {
+            background: transparent;
+            color: var(--tertiary);
+            border: 2px solid var(--tertiary);
+        }
+        .btn-danger:hover:not(:disabled) {
+            background: var(--tertiary);
+            color: var(--neutral);
+        }
+
+        /* Alerts & Status Boxes */
+        .alert {
+            padding: 14px 18px;
+            border-radius: 2px;
+            margin-bottom: 20px;
+            font-size: 0.95rem;
+            line-height: 1.5;
+            display: flex;
+            gap: 12px;
+            align-items: flex-start;
+        }
+        .alert-error {
+            background: #F8EBE8;
+            border: 1px solid var(--tertiary);
+            color: var(--tertiary);
+        }
+        .alert-info {
+            background: #E8EEF5;
+            border: 1px solid var(--secondary);
+            color: var(--secondary);
+        }
+        .alert-success {
+            background: #EEF5ED;
+            border: 1px solid #2D6A4F;
+            color: #2D6A4F;
+        }
+
+        /* Realtime Provisioning Countdown Box */
+        .prov-box {
+            background: #FAF6EE;
+            border: 2px solid var(--primary);
+            padding: 20px;
+            border-radius: 2px;
+            margin-top: 18px;
+            position: relative;
+        }
+
+        .prov-box.prov-failed {
+            border-color: var(--tertiary);
+            background: #FDF4F2;
+        }
+
+        .prov-box.prov-success {
+            border-color: #2D6A4F;
+            background: #F2F8F4;
+        }
+
+        .prov-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-family: var(--font-display);
+            font-weight: 700;
+            text-transform: uppercase;
+            font-size: 1rem;
+            letter-spacing: 0.05em;
+            color: var(--surface-dark);
+            margin-bottom: 8px;
+        }
+
+        .prov-timer {
+            font-family: var(--font-display);
+            font-size: 2.75rem;
+            font-weight: 700;
+            line-height: 1;
+            color: var(--primary-pressed);
+            margin: 6px 0 10px 0;
+        }
+
+        .prov-pulse {
+            display: inline-block;
+            width: 9px;
+            height: 9px;
+            border-radius: 50%;
+            background: var(--primary);
+            margin-right: 6px;
+            animation: pulse-ring 1.5s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
+        }
+
+        @keyframes pulse-ring {
+            0% { transform: scale(0.95); opacity: 1; }
+            50% { transform: scale(1.3); opacity: 0.5; }
+            100% { transform: scale(0.95); opacity: 1; }
+        }
+
+        .prov-desc {
+            font-size: 0.95rem;
+            color: var(--on-surface-muted);
+            margin: 0;
+        }
+
+        .prov-code {
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            color: var(--on-surface);
+            background: #EAE3D5;
+            padding: 2px 6px;
+        }
+
+        /* Tap Log Table */
         table {
             border-collapse: collapse;
             width: 100%;
-            margin-top: 12px;
-        }
-        th, td {
-            border: 1px solid var(--border);
-            padding: 8px 12px;
-            text-align: left;
+            margin-top: 8px;
             font-size: 0.9rem;
         }
-        th { background: #f1f5f9; }
-        .alert {
-            padding: 12px 16px;
-            border-radius: 6px;
-            margin-bottom: 16px;
-            font-size: 0.95rem;
+        th, td {
+            border-bottom: 1px solid var(--outline);
+            padding: 10px 12px;
+            text-align: left;
         }
-        .alert-error { background: #fee2e2; border: 1px solid #fecaca; color: #991b1b; }
-        .alert-warning { background: #fef3c7; border: 1px solid #fde68a; color: #92400e; }
-        .alert-info { background: #eff6ff; border: 1px solid #dbeafe; color: #1e40af; }
-        .countdown-box {
-            background: #fffbeb;
-            border: 1px solid #fef3c7;
-            padding: 16px;
-            border-radius: 6px;
-            margin-top: 16px;
-            text-align: center;
-        }
-        .countdown-timer {
-            font-size: 1.8rem;
+        th {
+            font-family: var(--font-display);
             font-weight: 700;
-            color: var(--warning);
-            margin: 8px 0;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--on-surface-muted);
+            font-size: 0.85rem;
+            background: #FAF7F0;
+        }
+        td code {
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
         }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
-            <div>
-                <h1>10BitWorks Key Portal</h1>
+            <div class="brand-block">
+                <span class="ref-kicker">REF. ACCESS // PORTAL 01</span>
+                <h1>10BitWorks Key Portal<span class="dot">.</span></h1>
             </div>
             <div id="nav-user" class="user-nav">
-                <!-- Injected via JS -->
+                <!-- User Nav injected via JS -->
             </div>
         </header>
 
         <div id="alert-container"></div>
 
         <!-- Anonymous / Login CTA -->
-        <div id="login-section" class="card" style="display:none; text-align: center; padding: 40px 20px;">
-            <h2>Welcome to Key Card Management</h2>
-            <p style="color: var(--text-muted); margin-bottom: 24px;">Sign in with your 10BitWorks Authentik account to view and manage your door access key.</p>
-            <a href="/auth/login"><button class="btn-primary" style="font-size: 1.05rem; padding: 10px 24px;">Sign In with Authentik</button></a>
+        <div id="login-section" class="card" style="display:none; text-align: center; padding: 48px 24px;">
+            <span class="ref-kicker">AUTHENTICATION REQUIRED</span>
+            <h2 style="font-size: 1.75rem; margin: 8px 0 16px 0;">Sign in for Key Card Access</h2>
+            <p style="color: var(--on-surface-muted); max-width: 520px; margin: 0 auto 24px auto;">
+                Sign in with your 10BitWorks membership account to inspect active NFC key credentials, door access logs, or enroll a replacement tag.
+            </p>
+            <a href="/auth/login" class="btn btn-primary" style="padding: 12px 36px; font-size: 18px;">Sign In with Authentik</a>
         </div>
 
-        <!-- Authenticated Portal View -->
+        <!-- Authenticated View -->
         <div id="portal-content" style="display:none;">
             <!-- Membership Card -->
             <div class="card">
-                <h2>Membership Status</h2>
+                <div class="card-header">
+                    <h2>Membership Identity</h2>
+                    <span class="card-ref">FIG. 01 · ROSTER SYNC</span>
+                </div>
                 <div id="membership-details" class="grid">
                     <!-- Populated via JS -->
                 </div>
@@ -167,34 +420,44 @@
 
             <!-- Key Card Card -->
             <div class="card">
-                <h2>Access Key Card</h2>
+                <div class="card-header">
+                    <h2>Enrolled Key Card</h2>
+                    <span class="card-ref">FIG. 02 · NFC NTAG 424</span>
+                </div>
                 <div id="key-details">
                     <!-- Populated via JS -->
                 </div>
 
                 <div id="pending-job-container"></div>
 
-                <div style="margin-top: 20px; display: flex; gap: 12px; align-items: center;" id="key-actions">
-                    <button id="btn-provision" class="btn-primary" onclick="provisionKey()">Tap to Enroll Replacement / New Card</button>
-                    <button id="btn-revoke" class="btn-danger" onclick="revokeKey()" style="display:none;">Revoke Active Card</button>
+                <div style="margin-top: 24px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap;" id="key-actions">
+                    <button id="btn-provision" class="btn-primary" onclick="provisionKey()">
+                        Tap to Enroll Replacement / New Card
+                    </button>
+                    <button id="btn-revoke" class="btn-danger" onclick="revokeKey()" style="display:none;">
+                        Revoke Active Card
+                    </button>
                 </div>
             </div>
 
             <!-- Recent Taps -->
             <div class="card">
-                <h2>Recent Door Taps</h2>
+                <div class="card-header">
+                    <h2>Recent Door Activity</h2>
+                    <span class="card-ref">FIG. 03 · AUDIT LOG (LAST 25)</span>
+                </div>
                 <div style="overflow-x: auto;">
                     <table id="taps-table">
                         <thead>
                             <tr>
                                 <th>Timestamp</th>
-                                <th>Device</th>
-                                <th>Decision</th>
-                                <th>Reason</th>
+                                <th>Reader Device</th>
+                                <th>Access Decision</th>
+                                <th>Diagnostic Reason</th>
                             </tr>
                         </thead>
                         <tbody id="taps-body">
-                            <tr><td colspan="4" style="text-align:center; color: var(--text-muted);">Loading recent activity...</td></tr>
+                            <tr><td colspan="4" style="text-align:center; color: var(--on-surface-muted);">Loading audit history...</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -205,33 +468,42 @@
     <script>
         let currentUser = null;
         let countdownInterval = null;
+        let realtimePollInterval = null;
+        let activeJobId = null;
 
         function showAlert(msg, type = 'error') {
             const container = document.getElementById('alert-container');
-            container.innerHTML = `<div class="alert alert-${type}">${msg}</div>`;
+            container.innerHTML = `
+                <div class="alert alert-${type}">
+                    <div style="font-weight:700; font-family:var(--font-display); letter-spacing:0.04em;">///</div>
+                    <div>${msg}</div>
+                </div>`;
         }
 
         function clearAlert() {
             document.getElementById('alert-container').innerHTML = '';
         }
 
-        async function fetchStatus() {
+        async function fetchStatus(isBackgroundPoll = false) {
             try {
                 const res = await fetch('/me/api/status');
                 if (res.status === 401) {
+                    stopRealtimePolling();
                     document.getElementById('login-section').style.display = 'block';
                     document.getElementById('portal-content').style.display = 'none';
-                    document.getElementById('nav-user').innerHTML = '<a href="/auth/login"><button class="btn-primary">Sign In</button></a>';
+                    document.getElementById('nav-user').innerHTML = '<a href="/auth/login" class="btn btn-primary" style="padding:4px 14px; font-size:13px;">Sign In</a>';
                     return;
                 }
-                if (!res.ok) {
-                    throw new Error('Failed to load status');
-                }
+                if (!res.ok) throw new Error('Status query failed (' + res.status + ')');
                 const data = await res.json();
                 renderPortal(data);
-                loadTaps();
+                if (!isBackgroundPoll) {
+                    loadTaps();
+                }
             } catch (err) {
-                showAlert('Error connecting to key portal: ' + err.message);
+                if (!isBackgroundPoll) {
+                    showAlert('Error connecting to access verifier: ' + err.message);
+                }
             }
         }
 
@@ -240,14 +512,14 @@
             document.getElementById('login-section').style.display = 'none';
             document.getElementById('portal-content').style.display = 'block';
 
-            // Nav header
+            // Top navigation
             const nav = document.getElementById('nav-user');
             const isAdmin = currentUser.is_admin;
             nav.innerHTML = `
-                <span><strong>${escapeHtml(currentUser.username)}</strong></span>
-                ${isAdmin ? '<a href="/admin"><span class="badge badge-admin">Admin Dashboard</span></a>' : ''}
+                <span style="font-family:var(--font-mono); font-size:13px; color:var(--on-surface);">${escapeHtml(currentUser.username)}</span>
+                ${isAdmin ? '<a href="/admin" class="badge badge-admin" style="text-decoration:none;">Admin</a>' : ''}
                 <form action="/auth/logout" method="POST" style="margin:0; display:inline;">
-                    <button type="submit" class="btn-secondary" style="padding: 4px 10px; font-size: 0.85rem;">Logout</button>
+                    <button type="submit" class="btn-outline" style="padding: 4px 12px; font-size: 13px;">Logout</button>
                 </form>
             `;
 
@@ -257,37 +529,36 @@
                 const m = data.membership;
                 const isActive = data.is_active;
                 memDiv.innerHTML = `
-                    <div>
-                        <div class="stat-label">Name</div>
-                        <div class="stat-value">${escapeHtml(m.display_name || m.member_key)}</div>
+                    <div class="stat-item">
+                        <span class="stat-label">Full Name</span>
+                        <span class="stat-value">${escapeHtml(m.display_name || m.member_key)}</span>
                     </div>
-                    <div>
-                        <div class="stat-label">Member Key</div>
-                        <div class="stat-value"><code>${escapeHtml(m.member_key)}</code></div>
+                    <div class="stat-item">
+                        <span class="stat-label">Roster Key</span>
+                        <span class="stat-value"><code>${escapeHtml(m.member_key)}</code></span>
                     </div>
-                    <div>
-                        <div class="stat-label">Access Status</div>
-                        <div class="stat-value">
+                    <div class="stat-item">
+                        <span class="stat-label">Access State</span>
+                        <span class="stat-value">
                             <span class="badge ${isActive ? 'badge-active' : 'badge-inactive'}">
-                                ${isActive ? 'Active Member' : 'Inactive / Expired'}
+                                ${isActive ? 'Active Member' : 'Expired / Grace'}
                             </span>
-                        </div>
+                        </span>
                     </div>
-                    <div>
-                        <div class="stat-label">Active Until</div>
-                        <div class="stat-value">${escapeHtml(m.active_until || 'N/A')}</div>
+                    <div class="stat-item">
+                        <span class="stat-label">Active Until</span>
+                        <span class="stat-value" style="font-size:0.95rem;">${escapeHtml(m.active_until || 'N/A')}</span>
                     </div>
                 `;
             } else {
                 memDiv.innerHTML = `
-                    <div style="grid-column: 1 / -1;" class="alert alert-warning">
-                        <strong>No membership record found</strong> for username <code>${escapeHtml(currentUser.username)}</code>.<br>
-                        Your Authentik account is recognized, but has not been synchronized into the membership roster. Please contact an onboarder.
+                    <div style="grid-column: 1 / -1;" class="alert alert-error">
+                        <div>No active roster record found for <code>${escapeHtml(currentUser.username)}</code>. Contact a 10BitWorks admin.</div>
                     </div>
                 `;
             }
 
-            // Key tag section
+            // Key tag details
             const keyDiv = document.getElementById('key-details');
             const revokeBtn = document.getElementById('btn-revoke');
             const provBtn = document.getElementById('btn-provision');
@@ -296,33 +567,32 @@
                 const tag = data.active_tag;
                 keyDiv.innerHTML = `
                     <div class="grid">
-                        <div>
-                            <div class="stat-label">Card UID</div>
-                            <div class="stat-value"><code>${escapeHtml(tag.uid)}</code></div>
+                        <div class="stat-item">
+                            <span class="stat-label">Card Hardware UID</span>
+                            <span class="stat-value"><code>${escapeHtml(tag.uid)}</code></span>
                         </div>
-                        <div>
-                            <div class="stat-label">Status</div>
-                            <div class="stat-value"><span class="badge badge-active">${escapeHtml(tag.status)}</span></div>
+                        <div class="stat-item">
+                            <span class="stat-label">Key Status</span>
+                            <span class="stat-value"><span class="badge badge-active">${escapeHtml(tag.status)}</span></span>
                         </div>
-                        <div>
-                            <div class="stat-label">Key Version</div>
-                            <div class="stat-value">${escapeHtml(String(tag.key_version))}</div>
+                        <div class="stat-item">
+                            <span class="stat-label">Key Diversification</span>
+                            <span class="stat-value">v${escapeHtml(String(tag.key_version))}</span>
                         </div>
-                        <div>
-                            <div class="stat-label">Enrolled At</div>
-                            <div class="stat-value">${escapeHtml(tag.enrolled_at)}</div>
+                        <div class="stat-item">
+                            <span class="stat-label">Enrolled Timestamp</span>
+                            <span class="stat-value" style="font-size:0.9rem;">${escapeHtml(tag.enrolled_at)}</span>
                         </div>
                     </div>
                 `;
                 revokeBtn.style.display = 'inline-block';
             } else {
                 keyDiv.innerHTML = `
-                    <p style="color: var(--text-muted); margin: 0 0 16px 0;">No active key card enrolled for your account.</p>
+                    <p style="color: var(--on-surface-muted); margin: 0 0 16px 0;">No active key card enrolled for your account.</p>
                 `;
                 revokeBtn.style.display = 'none';
             }
 
-            // Provision button guard
             if (!data.membership || !data.is_active) {
                 provBtn.disabled = true;
                 provBtn.title = "Membership must be active to provision a key card";
@@ -331,22 +601,125 @@
                 provBtn.title = "";
             }
 
-            // Pending job section
-            renderPendingJob(data.pending_job);
+            // Check Job Status & Transitions
+            evaluateJobState(data.pending_job, data.latest_job);
         }
 
-        function renderPendingJob(job) {
+        function evaluateJobState(pendingJob, latestJob) {
             const container = document.getElementById('pending-job-container');
-            if (countdownInterval) {
-                clearInterval(countdownInterval);
-                countdownInterval = null;
-            }
 
-            if (!job) {
-                container.innerHTML = '';
-                return;
-            }
+            if (pendingJob) {
+                activeJobId = pendingJob.job_id;
+                renderArmedJob(pendingJob);
+                startRealtimePolling();
+            } else {
+                // No pending job currently active
+                if (activeJobId) {
+                    // We were tracking an armed job that has now completed or failed!
+                    const finishedJobId = activeJobId;
+                    activeJobId = null;
+                    stopRealtimePolling();
 
+                    if (latestJob && latestJob.job_id === finishedJobId) {
+                        if (latestJob.outcome === 'enrolled') {
+                            container.innerHTML = `
+                                <div class="prov-box prov-success">
+                                    <div class="prov-header" style="color:#2D6A4F;">
+                                        <span>/// PROVISIONING COMPLETE</span>
+                                        <span>ENROLLED</span>
+                                    </div>
+                                    <div style="font-weight:600; color:#2D6A4F; font-size:1.15rem; margin-bottom:4px;">
+                                        Card enrolled successfully!
+                                    </div>
+                                    <p class="prov-desc">
+                                        Tag UID <code class="prov-code">${escapeHtml(latestJob.uid || 'Detected')}</code> is now bound to your account with door access granted.
+                                    </p>
+                                </div>
+                            `;
+                            loadTaps();
+                            return;
+                        } else if (latestJob.outcome === 'failed') {
+                            const errDetail = describeError(latestJob.reason);
+                            container.innerHTML = `
+                                <div class="prov-box prov-failed">
+                                    <div class="prov-header" style="color:var(--tertiary);">
+                                        <span>/// PROVISIONING FAILED</span>
+                                        <span>ERROR</span>
+                                    </div>
+                                    <div style="font-weight:600; color:var(--tertiary); font-size:1.15rem; margin-bottom:6px;">
+                                        ${escapeHtml(errDetail.headline)}
+                                    </div>
+                                    <p class="prov-desc" style="color:var(--on-surface);">
+                                        ${escapeHtml(errDetail.explanation)}
+                                    </p>
+                                    <div style="margin-top:10px; font-size:0.85rem; color:var(--on-surface-muted);">
+                                        Raw Diagnostic: <code>${escapeHtml(latestJob.reason || 'provision error')}</code>
+                                    </div>
+                                </div>
+                            `;
+                            return;
+                        } else if (latestJob.outcome === 'cancelled') {
+                            container.innerHTML = `
+                                <div class="prov-box prov-failed">
+                                    <div class="prov-header" style="color:var(--tertiary);">/// PROVISIONING CANCELLED</div>
+                                    <p class="prov-desc">This enrollment job was cancelled.</p>
+                                </div>
+                            `;
+                            return;
+                        }
+                    }
+
+                    // Fallback if expired without tap
+                    container.innerHTML = `
+                        <div class="prov-box prov-failed">
+                            <div class="prov-header" style="color:var(--tertiary);">/// PROVISIONING TIMED OUT</div>
+                            <p class="prov-desc">The 60-second window expired before a card tap completed on a writer device.</p>
+                        </div>
+                    `;
+                } else {
+                    // Not tracking any job and none pending
+                    container.innerHTML = '';
+                    if (countdownInterval) {
+                        clearInterval(countdownInterval);
+                        countdownInterval = null;
+                    }
+                }
+            }
+        }
+
+        function describeError(reason) {
+            if (!reason) {
+                return {
+                    headline: "Could not complete card enrollment",
+                    explanation: "The tag was presented but could not be programmed. Please try tapping again."
+                };
+            }
+            if (reason.includes('MacMismatch')) {
+                return {
+                    headline: "Card Readback Verification Mismatch",
+                    explanation: "The cryptographic CMAC returned by the tag did not match. Hold the tag steadily against the reader without moving it until the chirp finishes."
+                };
+            }
+            if (reason.includes('KeyMismatch')) {
+                return {
+                    headline: "Security Key Conflict",
+                    explanation: "This tag was previously locked with a different master key that does not belong to this makerspace."
+                };
+            }
+            if (reason.includes('provision error')) {
+                return {
+                    headline: "Card Programming Interrupted",
+                    explanation: "The tag dropped connection during the write sequence. Hold the card firmly against the center of the reader coil."
+                };
+            }
+            return {
+                headline: "Provisioning Error",
+                explanation: reason
+            };
+        }
+
+        function renderArmedJob(job) {
+            const container = document.getElementById('pending-job-container');
             const expiresAt = new Date(job.expires_at).getTime();
 
             function updateTimer() {
@@ -354,26 +727,48 @@
                 const remaining = Math.max(0, Math.floor((expiresAt - now) / 1000));
                 const timerEl = document.getElementById('timer-count');
                 if (timerEl) {
-                    timerEl.textContent = remaining + 's';
+                    timerEl.textContent = remaining + 'S';
                 }
                 if (remaining <= 0) {
                     clearInterval(countdownInterval);
                     countdownInterval = null;
-                    fetchStatus(); // Refresh when expired
+                    fetchStatus();
                 }
             }
 
             container.innerHTML = `
-                <div class="countdown-box">
-                    <div style="font-weight: 600; color: #92400e;">Provisioning Armed — Tap Card at Any Writer Device</div>
-                    <div class="countdown-timer" id="timer-count">--s</div>
-                    <div style="font-size: 0.9rem; color: var(--text-muted);">
-                        Job ID: <code>${escapeHtml(job.job_id)}</code> | Tap your new or replacement NFC tag on any keygate writer.
+                <div class="prov-box">
+                    <div class="prov-header">
+                        <span><span class="prov-pulse"></span>WRITER LISTENING // TAP CARD NOW</span>
+                        <span style="font-family:var(--font-mono); font-size:12px;">TIMEOUT IN:</span>
+                    </div>
+                    <div class="prov-timer" id="timer-count">--S</div>
+                    <p class="prov-desc">
+                        Hold your new or replacement NTAG 424 DNA tag against the door reader coil. Keep card in place until the confirmation chirp sounds.
+                    </p>
+                    <div style="margin-top:10px; font-size:0.8rem; color:var(--on-surface-muted);">
+                        Job Ref: <code class="prov-code">${escapeHtml(job.job_id)}</code>
                     </div>
                 </div>
             `;
             updateTimer();
+            if (countdownInterval) clearInterval(countdownInterval);
             countdownInterval = setInterval(updateTimer, 1000);
+        }
+
+        function startRealtimePolling() {
+            if (realtimePollInterval) return;
+            // Poll every 1200ms while a provisioning job is actively armed
+            realtimePollInterval = setInterval(() => {
+                fetchStatus(true);
+            }, 1200);
+        }
+
+        function stopRealtimePolling() {
+            if (realtimePollInterval) {
+                clearInterval(realtimePollInterval);
+                realtimePollInterval = null;
+            }
         }
 
         async function provisionKey() {
@@ -386,7 +781,7 @@
                 if (!res.ok) {
                     throw new Error(body.error || 'Failed to arm provisioning job');
                 }
-                showAlert('Provisioning armed! Tap your card on any keygate writer within 60s.', 'info');
+                showAlert('Provisioning armed! Tap your card against any KeyGate writer within 60s.', 'info');
                 fetchStatus();
             } catch (err) {
                 showAlert(err.message, 'error');
@@ -402,9 +797,7 @@
             try {
                 const res = await fetch('/me/revoke', { method: 'POST' });
                 const body = await res.json();
-                if (!res.ok) {
-                    throw new Error(body.error || 'Failed to revoke key');
-                }
+                if (!res.ok) throw new Error(body.error || 'Failed to revoke key');
                 showAlert('Active key card revoked.', 'info');
                 fetchStatus();
                 loadTaps();
@@ -420,23 +813,26 @@
                 if (!res.ok) return;
                 const taps = await res.json();
                 if (taps.length === 0) {
-                    bodyEl.innerHTML = '<tr><td colspan="4" style="text-align:center; color: var(--text-muted);">No recorded door taps.</td></tr>';
+                    bodyEl.innerHTML = '<tr><td colspan="4" style="text-align:center; color: var(--on-surface-muted); padding:20px;">No recorded door taps on file.</td></tr>';
                     return;
                 }
-                bodyEl.innerHTML = taps.map(t => `
-                    <tr>
-                        <td>${escapeHtml(t.ts)}</td>
-                        <td><code>${escapeHtml(t.device_id || 'unknown')}</code></td>
-                        <td>
-                            <span class="badge ${t.decision === 'granted' ? 'badge-active' : 'badge-inactive'}">
-                                ${escapeHtml(t.decision)}
-                            </span>
-                        </td>
-                        <td>${escapeHtml(t.reason)}</td>
-                    </tr>
-                `).join('');
+                bodyEl.innerHTML = taps.map(t => {
+                    const isGranted = (t.decision === 'granted');
+                    return `
+                        <tr>
+                            <td style="font-family:var(--font-mono); font-size:12px;">${escapeHtml(t.ts)}</td>
+                            <td><code>${escapeHtml(t.device_id || 'unknown')}</code></td>
+                            <td>
+                                <span class="badge ${isGranted ? 'badge-active' : 'badge-inactive'}">
+                                    ${escapeHtml(t.decision)}
+                                </span>
+                            </td>
+                            <td style="font-size:13px; color:var(--on-surface-muted);">${escapeHtml(t.reason || '—')}</td>
+                        </tr>
+                    `;
+                }).join('');
             } catch (e) {
-                bodyEl.innerHTML = '<tr><td colspan="4" style="text-align:center; color: red;">Error loading taps.</td></tr>';
+                bodyEl.innerHTML = '<tr><td colspan="4" style="text-align:center; color: var(--tertiary);">Error loading audit records.</td></tr>';
             }
         }
 

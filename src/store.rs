@@ -493,6 +493,9 @@ impl Store {
                 device_id: row.get(3)?,
                 created_at: row.get(4)?,
                 expires_at: row.get(5)?,
+                consumed_at: None,
+                outcome: None,
+                reason: None,
             })
         })?;
         rows.collect()
@@ -965,10 +968,99 @@ impl Store {
                         device_id: row.get(3)?,
                         created_at: row.get(4)?,
                         expires_at: row.get(5)?,
+                        consumed_at: None,
+                        outcome: None,
+                        reason: None,
                     })
                 },
             )
             .optional()
+    }
+
+    /// Retrieve the most recent provisioning job for a member, regardless of whether it is
+    /// pending, completed, or failed.
+    pub fn latest_job_for_member(
+        &self,
+        member_key: &str,
+    ) -> rusqlite::Result<Option<MemberJobStatus>> {
+        let row: Option<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+        )> = self
+            .conn
+            .query_row(
+                "SELECT job_id, uid, member_key, device_id, created_at, expires_at, consumed_at
+                 FROM jobs
+                 WHERE member_key = ?1
+                 ORDER BY created_at DESC LIMIT 1",
+                params![member_key],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let Some((job_id, uid, member_key, device_id, created_at, expires_at, consumed_at)) = row
+        else {
+            return Ok(None);
+        };
+
+        let mut outcome = None;
+        let mut reason = None;
+
+        if consumed_at.is_some() {
+            // Check audit log for this job's outcome
+            let audit_row: Option<(String, String)> = self
+                .conn
+                .query_row(
+                    "SELECT decision, reason FROM audit_log
+                     WHERE (reason = 'job_done' OR reason = 'job_failed' OR reason = 'cancelled')
+                       AND ts >= ?1
+                     ORDER BY id DESC LIMIT 1",
+                    params![created_at],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+
+            if let Some((dec, r)) = audit_row {
+                if r == "job_done" && dec == "granted" {
+                    outcome = Some("enrolled".to_string());
+                } else if r == "cancelled" {
+                    outcome = Some("cancelled".to_string());
+                    reason = Some("Job was cancelled by an admin.".to_string());
+                } else {
+                    outcome = Some("failed".to_string());
+                    reason = Some(r);
+                }
+            } else {
+                outcome = Some("consumed".to_string());
+            }
+        }
+
+        Ok(Some(MemberJobStatus {
+            job_id,
+            uid,
+            member_key,
+            device_id,
+            created_at,
+            expires_at,
+            consumed_at,
+            outcome,
+            reason,
+        }))
     }
 
     pub fn list_audit_for_uids(
@@ -1026,14 +1118,19 @@ pub struct JobRow {
 
 /// A live provisioning job as shown in the admin UI's pending list (T6).
 /// An empty `uid` is a wildcard job whose tag has not been tapped yet.
+pub type PendingJobRow = MemberJobStatus;
+
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct PendingJobRow {
+pub struct MemberJobStatus {
     pub job_id: String,
     pub uid: String,
     pub member_key: String,
     pub device_id: String,
     pub created_at: String,
     pub expires_at: String,
+    pub consumed_at: Option<String>,
+    pub outcome: Option<String>, // "enrolled", "failed", "cancelled", etc.
+    pub reason: Option<String>,
 }
 
 #[derive(Debug)]

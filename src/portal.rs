@@ -488,13 +488,16 @@ async fn auth_login(State(state): State<PortalState>) -> Response {
     };
 
     let is_https = cfg.public_url.starts_with("https://");
-    let flow_json = serde_json::to_string(&flow_state).unwrap_or_default();
-    let flow_cookie = Cookie::build((OIDC_COOKIE_NAME, flow_json))
+    use base64::Engine;
+    let flow_raw_json = serde_json::to_string(&flow_state).unwrap_or_default();
+    let flow_b64 =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(flow_raw_json.as_bytes());
+    let flow_cookie = Cookie::build((OIDC_COOKIE_NAME, flow_b64))
         .path("/auth/callback")
         .http_only(true)
         .same_site(cookie::SameSite::Lax)
         .secure(is_https)
-        .max_age(cookie::time::Duration::minutes(10))
+        .max_age(cookie::time::Duration::minutes(15))
         .build();
 
     let mut response = Redirect::to(url_with_nonce.as_str()).into_response();
@@ -549,16 +552,42 @@ async fn auth_callback(
     }
 
     let Some(flow_raw) = flow_cookie_str else {
+        tracing::warn!(
+            "OIDC callback missing flow cookie; redirecting to login to re-authenticate"
+        );
         return (
-            StatusCode::BAD_REQUEST,
-            "Missing flow cookie (session expired)",
+            StatusCode::SEE_OTHER,
+            [(header::LOCATION, "/auth/login")],
+            "Session expired; redirecting to login...",
         )
             .into_response();
     };
 
-    let flow: OidcFlowCookie = match serde_json::from_str(&flow_raw) {
+    use base64::Engine;
+    // Decode url-safe base64 or fall back to raw json for backward compatibility
+    let flow_json = if let Ok(bytes) =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(flow_raw.trim_matches('"'))
+    {
+        String::from_utf8(bytes).unwrap_or_else(|_| flow_raw.clone())
+    } else if let Ok(bytes) =
+        base64::engine::general_purpose::STANDARD.decode(flow_raw.trim_matches('"'))
+    {
+        String::from_utf8(bytes).unwrap_or_else(|_| flow_raw.clone())
+    } else {
+        flow_raw
+    };
+
+    let flow: OidcFlowCookie = match serde_json::from_str(&flow_json) {
         Ok(f) => f,
-        Err(_) => return (StatusCode::BAD_REQUEST, "Invalid flow cookie").into_response(),
+        Err(_) => {
+            tracing::warn!("Invalid flow cookie; redirecting to login");
+            return (
+                StatusCode::SEE_OTHER,
+                [(header::LOCATION, "/auth/login")],
+                "Invalid session state; redirecting to login...",
+            )
+                .into_response();
+        }
     };
 
     if flow.csrf_token != ret_state {

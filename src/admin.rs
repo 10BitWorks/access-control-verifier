@@ -119,6 +119,12 @@ async fn auth_middleware(
                         if principal.is_admin() {
                             return next.run(req).await;
                         } else {
+                            tracing::warn!(
+                                username = %principal.username,
+                                roles = ?principal.roles,
+                                expected_role = %admin_role,
+                                "Admin access denied: user lacks required admin role"
+                            );
                             // Logged-in non-admin gets a styled 403 on HTML or JSON error on API
                             let is_html_req = req.uri().path() == "/admin";
                             if is_html_req {

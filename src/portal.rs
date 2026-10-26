@@ -681,6 +681,7 @@ async fn auth_callback(
 
     // Extract roles (support custom `roles` claim or fallback to `groups`)
     let roles = claims.roles.or(claims.groups).unwrap_or_default();
+    tracing::info!(username = %username, ?roles, "OIDC user authenticated, issuing session cookie");
 
     // Create session JWT
     let now_ts = chrono::Utc::now().timestamp() as usize;

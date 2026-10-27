@@ -1,5 +1,5 @@
 use access_control_verifier::api::{AppState, NoopSink};
-use access_control_verifier::crypto::Key;
+use access_control_verifier::crypto::{cmac_for, Key, TapCounter, Uid};
 use access_control_verifier::portal::{
     verify_session_token, SessionClaims, OIDC_COOKIE_NAME, SESSION_COOKIE_NAME,
 };
@@ -641,4 +641,161 @@ async fn test_oidc_callback_verifies_id_token_signature_via_jwks() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+// ---------------------------------------------------------------------------
+// SUN web tap landing (public /?uid=&c=&cmac=) + lost-key reporting
+// ---------------------------------------------------------------------------
+
+const TAP_UID: &str = "042c35ba851b90";
+
+/// Seed an active member with a phone number and an enrolled tag.
+fn seed_member_with_tag(f: &TestFixture) {
+    let mut store = f.store.lock().unwrap();
+    store
+        .conn_mut()
+        .execute(
+            "INSERT INTO members (member_key, display_name, active_until, phone)
+             VALUES ('alice', 'Alice Example', datetime('now', '+30 days'), '555-0100')",
+            [],
+        )
+        .unwrap();
+    store
+        .enroll_tag(TAP_UID, "alice", 1, "2026-10-27T00:00:00Z")
+        .unwrap();
+}
+
+fn sun_params(master: &Key, counter: u32) -> (String, String) {
+    let uid = Uid::from_hex(TAP_UID).unwrap();
+    let cmac = cmac_for(master, &uid, &TapCounter::from_u32(counter));
+    (format!("{counter:06X}"), hex::encode(cmac.0))
+}
+
+#[tokio::test]
+async fn test_web_tap_renders_member_and_records_counter() {
+    let f = setup_test_app();
+    seed_member_with_tag(&f);
+    let master = Key::from_hex(MASTER_HEX).unwrap();
+    let (c, cmac) = sun_params(&master, 42);
+
+    let uri = format!("/?uid={TAP_UID}&c={c}&cmac={cmac}");
+    let (status, body, _) = get_request(&f.app, &uri, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let html = body["raw"].as_str().unwrap();
+    assert!(html.contains("Alice Example"), "member name rendered");
+    assert!(html.contains("555-0100"), "phone rendered");
+    assert!(html.contains("badge-active"), "door status active");
+    assert!(html.contains(">42<"), "tap counter rendered");
+    assert!(html.contains("Open 10Bit Apps"), "apps button rendered");
+    assert!(html.contains("Report Lost Key"), "lost-key button rendered");
+
+    // The web tap must advance the stored counter like a door tap.
+    let tag = f.store.lock().unwrap().tag_by_uid(TAP_UID).unwrap().unwrap();
+    assert_eq!(tag.last_counter, 42);
+}
+
+#[tokio::test]
+async fn test_web_tap_bad_cmac_is_generic() {
+    let f = setup_test_app();
+    seed_member_with_tag(&f);
+
+    let uri = format!("/?uid={TAP_UID}&c=00002A&cmac=0000000000000000");
+    let (status, body, _) = get_request(&f.app, &uri, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let html = body["raw"].as_str().unwrap();
+    assert!(html.contains("Unrecognized Key"));
+    // No member data may leak on CMAC failure.
+    assert!(!html.contains("Alice Example"));
+    assert!(!html.contains("555-0100"));
+}
+
+#[tokio::test]
+async fn test_web_tap_unknown_uid_is_generic() {
+    let f = setup_test_app();
+    seed_member_with_tag(&f);
+    let master = Key::from_hex(MASTER_HEX).unwrap();
+    let uid = Uid::from_hex(TAP_UID).unwrap();
+    let cmac = cmac_for(&master, &uid, &TapCounter::from_u32(7));
+
+    let uri = format!("/?uid=00000000000000&c=000007&cmac={}", hex::encode(cmac.0));
+    let (status, body, _) = get_request(&f.app, &uri, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let html = body["raw"].as_str().unwrap();
+    assert!(html.contains("Unrecognized Key"));
+    assert!(!html.contains("Alice Example"));
+}
+
+#[tokio::test]
+async fn test_report_lost_revokes_tag_and_is_replay_tolerant() {
+    let f = setup_test_app();
+    seed_member_with_tag(&f);
+    let master = Key::from_hex(MASTER_HEX).unwrap();
+    let (c, cmac) = sun_params(&master, 7);
+    let payload = json!({ "uid": TAP_UID, "c": c, "cmac": cmac });
+
+    let (status, body, _) = post_request(&f.app, "/tap/report-lost", None, payload.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], true);
+
+    let tag = f.store.lock().unwrap().tag_by_uid(TAP_UID).unwrap().unwrap();
+    assert_eq!(tag.status, "revoked");
+
+    // The GET already recorded the counter; the report endpoint must accept
+    // the same triple again without complaining about replay.
+    let (status, body, _) = post_request(&f.app, "/tap/report-lost", None, payload).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["message"], "Key was already deactivated.");
+}
+
+#[tokio::test]
+async fn test_report_lost_bad_cmac_rejected() {
+    let f = setup_test_app();
+    seed_member_with_tag(&f);
+
+    let (status, _, _) = post_request(
+        &f.app,
+        "/tap/report-lost",
+        None,
+        json!({ "uid": TAP_UID, "c": "000007", "cmac": "0000000000000000" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Tag must remain active.
+    let tag = f.store.lock().unwrap().tag_by_uid(TAP_UID).unwrap().unwrap();
+    assert_eq!(tag.status, "active");
+}
+
+#[tokio::test]
+async fn test_denied_tap_reports_member_inactive_when_roster_row_missing() {
+    let f = setup_test_app();
+    // Tag enrolled, but the member's roster row is gone (sync removed them).
+    f.store
+        .lock()
+        .unwrap()
+        .enroll_tag(TAP_UID, "ghost", 1, "2026-10-27T00:00:00Z")
+        .unwrap();
+    let master = Key::from_hex(MASTER_HEX).unwrap();
+    let (c, cmac) = sun_params(&master, 88);
+
+    let uri = format!("/?uid={TAP_UID}&c={c}&cmac={cmac}");
+    let (status, body, _) = get_request(&f.app, &uri, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let html = body["raw"].as_str().unwrap();
+    assert!(html.contains("badge-expired"), "expired badge shown");
+
+    // The door path records the same semantics: roster absence is
+    // member_inactive, not unknown_member.
+    let reason: String = f
+        .store
+        .lock()
+        .unwrap()
+        .conn_mut()
+        .query_row(
+            "SELECT reason FROM audit_log ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(reason, "member_inactive");
 }

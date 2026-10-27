@@ -119,7 +119,8 @@ fn build(sink: Arc<dyn DecisionSink>) -> (axum::Router, Arc<Mutex<Store>>, Named
         .expect("enroll revoked tag");
     store.revoke_tag(UID_REVOKED).expect("revoke tag");
 
-    // Tag bound to a member that does not exist -> store decision unknown_member.
+    // Tag bound to a member that does not exist -> store decision member_inactive
+    // (roster absence reads as a lapsed membership, v0.4.0 semantics).
     store
         .enroll_tag(UID_NO_MEMBER, "ghost", 1, &now)
         .expect("enroll orphan tag");

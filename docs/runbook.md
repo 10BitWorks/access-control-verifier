@@ -276,6 +276,10 @@ The access verifier includes a self-service NFC key portal (`/me`) with Authenti
 - `SESSION_SECRET`: Secret key for HMAC-SHA256 signing of the `keygate_session` JWT cookie.
 - `SESSION_LIFETIME_HOURS`: Cookie session duration in hours (defaults to `12`).
 - `ADMIN_ROLE`: Authentik role or group name granting access to the `/admin` dashboard (defaults to `Onboarder`).
+- `SLACK_WEBHOOK_URL` (optional): Slack incoming-webhook URL. When set, a
+  member-reported lost key (SUN tap page → "Report Lost Key") posts an alert
+  to that channel. Unset/empty disables the notification (revocation still
+  happens; a warning is logged).
 
 If OIDC environment variables are unset, portal routes render a "not configured" notice, and `/admin` continues functioning with bearer token authentication for backwards compatibility.
 
@@ -285,16 +289,27 @@ If OIDC environment variables are unset, portal routes render a "not configured"
 2. **Grant Type**: Authorization Code with PKCE (S256).
 3. **Redirect URI**: `{PUBLIC_URL}/auth/callback` (e.g. `https://keys.10bitworks.org/auth/callback`).
 4. **Scopes & Claims**:
-   - `openid`, `profile`, `email`.
+   - `openid`, `profile`, `email`, **`roles`** (0.3.4+: the `roles` scope must
+     be requested for the `KeyGate Roles` scope mapping to run at all).
    - `preferred_username` claim in ID token matching `members.member_key`.
-   - `roles` (or `groups`) array claim in ID token.
+   - `roles` (or `groups`) array claim in ID token. The `KeyGate Roles` scope
+     mapping must use `request.user.all_roles()` (direct + group-inherited
+     roles). `request.user.ak_roles` does not exist in authentik 2026.x — a
+     mapping referencing it throws `AttributeError`, authentik silently omits
+     the claim, and every user loses admin (check Events →
+     `property_mapping_exception`).
 5. **Admin Access**:
    - Users with `ADMIN_ROLE` (default `Onboarder`) in their `roles` or `groups` array can access `/admin` and `/admin/api/*` directly via browser session without needing a separate `ADMIN_BEARER_TOKEN`.
    - Logged-in non-admin sessions hitting `/admin` receive a 403 Forbidden page rather than an authentication loop.
+   - Signed-out requests to `/admin` (non-API paths) redirect to `/` (0.3.6+).
 
 ### User Flow & Provisioning Policy
 
 - **Self-service URL**: `GET /` redirects to `GET /me`.
+- **Roster sync on first login** (0.3.6+): the OIDC callback runs a full
+  Authentik sync cycle whenever the logging-in user has no roster row, so new
+  members can provision immediately instead of waiting for the hourly sync.
+  A failed sync never blocks the login (warn-level log).
 - **Status Check**: Displays Authentik username, membership status (active/inactive and expiration date), current enrolled key card (UID, enrollment date, version — never raw key material), and recent door taps (last 25 for their UIDs).
 - **Tap-to-Enroll Provisioning (`POST /me/provision`)**:
   - Arms a wildcard provisioning job for the member's account.
@@ -304,6 +319,38 @@ If OIDC environment variables are unset, portal routes render a "not configured"
   - **Replacement Semantics**: Tapping and enrolling a new key card automatically revokes any previous active tag for that member.
 - **Revocation (`POST /me/revoke`)**:
   - Revokes only active cards belonging to the logged-in member.
+
+### SUN tap landing page (0.4.0+)
+
+Provisioned cards carry the NDEF SUN URL `https://keys.10bitworks.org/?uid=&c=&cmac=`.
+Tapping a card on a phone opens that URL on `GET /`, which the portal serves
+publicly (no sign-in — possession of a valid `(uid, counter, CMAC)` triple IS
+the card):
+
+- Invalid/unknown/bad-CMAC triples all get one identical "Unrecognized Key"
+  page (no validity oracle).
+- Valid taps render the member's display name, phone (when synced — see
+  below), door status badge, tap counter (anti-replay: the counter is
+  recorded exactly like a door tap, device id `web-tap`; rescanning the same
+  link shows the stored counter with a "stale link" notice), enrollment date,
+  and key version.
+- **Open 10Bit Apps** → the Authentik application library
+  (`https://auth.10bitworks.org/my/applications`).
+- **Report Lost Key** (`POST /tap/report-lost`, same triple re-validated,
+  replay-tolerant) revokes the tag instantly, writes
+  `audit_log(reason=reported_lost)`, and posts to Slack when
+  `SLACK_WEBHOOK_URL` is set.
+
+**Member phone**: synced from Authentik user attributes
+`civicrm.phone` (fallback `phone`). The "Login - sync Current Members from
+CiviCRM" expression policy writes it (v2 policy: it also refreshes the
+`civicrm.contact_id` anchor every login — critical after CiviCRM contact
+merges, because a stale anchor pointing at a merged-away contact makes the
+policy permanently remove the user from `Current Members`).
+
+**Denial semantics** (0.4.0+): a tag whose member has no roster row is
+`member_inactive` (the hourly sync removes rows when members leave the
+Authentik group, which reads as a lapsed membership), not `unknown_member`.
 
 ### Production deployment (current)
 
@@ -319,7 +366,8 @@ If OIDC environment variables are unset, portal routes render a "not configured"
   `ghcr.io/10bitworks/access-control-verifier:X.Y.Z` → on prod swap the `image:`
   tag in `compose.yaml` → `docker compose pull && docker compose up -d` → wait
   for `(healthy)` in `docker ps`.
-- **Current image**: `0.3.1` (commits `17dd253` fix + `0b1f3a0` fmt, tag `v0.3.1`).
+- **Current image**: `0.4.0` (SUN tap landing + lost-key reporting, admin
+  Blueprint restyle, roster sync on first login, phone sync).
 
 ### OIDC gotchas
 

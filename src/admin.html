@@ -1,100 +1,656 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>10BitWorks Access Admin</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
-        body { font-family: sans-serif; margin: 20px; }
-        h2 { margin-top: 30px; border-bottom: 1px solid #ccc; padding-bottom: 5px; }
-        table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
-        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-        th { background-color: #f2f2f2; }
-        form { background: #f9f9f9; padding: 15px; border: 1px solid #ddd; margin-bottom: 20px; }
-        input, select, button { margin: 5px 0; padding: 5px; }
-        .error { color: red; }
+        :root {
+            /* 10BitWorks Blueprint System tokens */
+            --primary: #C9952A;          /* Dark Brass */
+            --primary-hover: #B8861F;
+            --primary-pressed: #A87A1F;
+            --secondary: #3A5A7C;        /* Draft Blue */
+            --tertiary: #8B3A2A;         /* Anvil Red */
+            --neutral: #F5F0E6;          /* Blueprint Linen ground */
+            --surface: #FFFFFF;          /* Card surface */
+            --surface-dark: #302922;     /* Shop Dark */
+            --on-surface: #1A1A1A;       /* Carbon Black */
+            --on-surface-muted: #6E655B; /* Cinder */
+            --on-surface-dark: #F5F0E6;
+            --on-surface-dark-muted: #BDB6A7;
+            --outline: #D1D1D1;          /* Light Gray */
+
+            --font-display: 'Barlow Condensed', sans-serif;
+            --font-body: 'Barlow', sans-serif;
+            --font-mono: 'JetBrains Mono', monospace;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: var(--font-body);
+            font-size: 16px;
+            line-height: 1.6;
+            background-color: var(--neutral);
+            color: var(--on-surface);
+            margin: 0;
+            padding: 32px 16px;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            text-rendering: optimizeLegibility;
+        }
+
+        .container {
+            max-width: 1040px;
+            margin: 0 auto;
+        }
+
+        /* Top Blueprint Header */
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+            margin-bottom: 24px;
+            border-bottom: 2px solid var(--on-surface);
+            padding-bottom: 16px;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+
+        .brand-block {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .ref-kicker {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            letter-spacing: 2px;
+            color: var(--primary);
+            text-transform: uppercase;
+            font-weight: 500;
+            margin-bottom: 4px;
+        }
+
+        h1 {
+            font-family: var(--font-display);
+            font-size: clamp(2rem, 4vw, 2.75rem);
+            font-weight: 700;
+            line-height: 1;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+            margin: 0;
+            color: var(--on-surface);
+            text-wrap: balance;
+        }
+
+        h1 .dot {
+            color: var(--primary);
+        }
+
+        #session-info {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-family: var(--font-display);
+            font-size: 14px;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            flex-wrap: wrap;
+        }
+
+        #session-info a {
+            color: var(--on-surface);
+            text-decoration: none;
+            border: 1px solid var(--outline);
+            background: var(--surface);
+            padding: 5px 12px;
+            border-radius: 0px;
+            font-weight: 700;
+            transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
+        }
+
+        #session-info a:hover {
+            background: var(--on-surface);
+            color: var(--neutral);
+            border-color: var(--on-surface);
+        }
+
+        #whoami {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: var(--on-surface-muted);
+            letter-spacing: 0.5px;
+            text-transform: none;
+        }
+
+        #whoami strong {
+            color: var(--on-surface);
+        }
+
+        /* Admin Token / Auth Banner */
+        #auth-banner {
+            background: var(--surface);
+            border: 1px solid var(--outline);
+            border-left: 4px solid var(--primary);
+            padding: 16px 20px;
+            margin-bottom: 24px;
+            border-radius: 2px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        #auth-banner label {
+            font-family: var(--font-display);
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--on-surface);
+        }
+
+        #auth-banner input[type="password"] {
+            flex: 1;
+            min-width: 260px;
+            padding: 8px 12px;
+            border: 1px solid var(--outline);
+            border-radius: 0px;
+            font-family: var(--font-mono);
+            font-size: 13px;
+            background: #FAFAFA;
+            color: var(--on-surface);
+        }
+
+        #auth-banner input[type="password"]:focus {
+            outline: 2px solid var(--primary);
+            outline-offset: 1px;
+            background: #FFFFFF;
+        }
+
+        #auth-status {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: var(--on-surface-muted);
+        }
+
+        /* Error and Alerts */
+        .error, #error {
+            color: var(--tertiary);
+            font-family: var(--font-mono);
+            font-size: 13px;
+            margin-bottom: 16px;
+            empty-cells: hide;
+        }
+        #error:not(:empty) {
+            background: #F8EBE8;
+            border: 1px solid var(--tertiary);
+            padding: 12px 16px;
+            border-radius: 2px;
+        }
+
+        /* Cards */
+        .card, section.card {
+            background: var(--surface);
+            border: 1px solid var(--outline);
+            border-radius: 2px;
+            padding: 24px;
+            margin-bottom: 24px;
+            box-shadow: none; /* strictly flat */
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            position: relative;
+            border-bottom: 1px solid var(--outline);
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        /* Partial-width Dark Brass rule under section headings */
+        .card-header::after {
+            content: "";
+            position: absolute;
+            left: 0;
+            bottom: -1px;
+            width: 90px;
+            height: 2px;
+            background-color: var(--primary);
+        }
+
+        h2 {
+            font-family: var(--font-display);
+            font-size: 1.5rem;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            margin: 0;
+            color: var(--on-surface);
+            line-height: 1.1;
+            text-wrap: balance;
+        }
+
+        h3 {
+            font-family: var(--font-display);
+            font-size: 1.15rem;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            margin: 24px 0 12px 0;
+            color: var(--on-surface-muted);
+        }
+
+        .card-ref {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            letter-spacing: 2px;
+            color: var(--on-surface-muted);
+            text-transform: uppercase;
+            font-weight: 500;
+        }
+
+        /* Forms */
+        form {
+            background: #FAF7F0;
+            padding: 16px 20px;
+            border: 1px solid var(--outline);
+            border-radius: 2px;
+            margin: 16px 0 20px 0;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+        }
+
+        input[type="text"],
+        input[type="number"],
+        input[type="password"],
+        select {
+            font-family: var(--font-mono);
+            font-size: 13px;
+            padding: 8px 12px;
+            border: 1px solid var(--outline);
+            border-radius: 0px;
+            background: var(--surface);
+            color: var(--on-surface);
+            min-height: 38px;
+        }
+
+        input[type="text"]:focus,
+        input[type="number"]:focus,
+        input[type="password"]:focus,
+        select:focus {
+            outline: 2px solid var(--primary);
+            outline-offset: 1px;
+            border-color: var(--primary);
+        }
+
+        input::placeholder {
+            color: #9C948A;
+            font-family: var(--font-body);
+        }
+
+        label {
+            font-family: var(--font-body);
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--on-surface);
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        input[type="checkbox"] {
+            accent-color: var(--primary);
+            width: 16px;
+            height: 16px;
+            cursor: pointer;
+        }
+
+        /* Buttons (10BitWorks Contract) */
+        button, .btn {
+            font-family: var(--font-display);
+            font-size: 15px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            padding: 8px 20px;
+            border-radius: 0px; /* Rectilinear square */
+            cursor: pointer;
+            transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            border: none;
+            min-height: 38px;
+            line-height: 1.2;
+        }
+
+        /* Primary action button */
+        button[type="submit"],
+        .btn-primary,
+        #save-token-btn,
+        #prov-arm {
+            background: var(--primary);
+            color: var(--on-surface);
+            border: none;
+        }
+
+        button[type="submit"]:hover:not(:disabled),
+        .btn-primary:hover:not(:disabled),
+        #save-token-btn:hover:not(:disabled),
+        #prov-arm:hover:not(:disabled) {
+            background: var(--primary-hover);
+        }
+
+        button[type="submit"]:active:not(:disabled),
+        .btn-primary:active:not(:disabled),
+        #save-token-btn:active:not(:disabled),
+        #prov-arm:active:not(:disabled) {
+            background: var(--primary-pressed);
+        }
+
+        button:disabled,
+        .btn:disabled {
+            background: var(--outline) !important;
+            color: var(--on-surface-muted) !important;
+            border-color: var(--outline) !important;
+            cursor: not-allowed !important;
+        }
+
+        /* Outline / Secondary */
+        button[type="button"],
+        .btn-outline,
+        #prov-cancel {
+            background: transparent;
+            color: var(--on-surface);
+            border: 2px solid var(--on-surface-muted);
+        }
+
+        button[type="button"]:hover:not(:disabled),
+        .btn-outline:hover:not(:disabled),
+        #prov-cancel:hover:not(:disabled) {
+            background: var(--on-surface);
+            color: var(--neutral);
+            border-color: var(--on-surface);
+        }
+
+        /* Table Action buttons (Revoke / Cancel) -> Anvil Red outline */
+        td button,
+        .btn-danger {
+            background: transparent;
+            color: var(--tertiary);
+            border: 1px solid var(--tertiary);
+            padding: 4px 10px;
+            font-size: 13px;
+            min-height: auto;
+        }
+
+        td button:hover:not(:disabled),
+        .btn-danger:hover:not(:disabled) {
+            background: var(--tertiary);
+            color: var(--neutral);
+        }
+
+        /* Tables */
+        .table-wrap {
+            overflow-x: auto;
+            margin-bottom: 12px;
+            border: 1px solid var(--outline);
+            border-radius: 2px;
+        }
+
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 0;
+            font-size: 14px;
+            background: var(--surface);
+        }
+
+        th, td {
+            border: none;
+            border-bottom: 1px solid var(--outline);
+            padding: 10px 14px;
+            text-align: left;
+            vertical-align: middle;
+        }
+
+        th {
+            font-family: var(--font-display);
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--on-surface-muted);
+            font-size: 12px;
+            background: #FAF7F0;
+            white-space: nowrap;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        tr:hover td {
+            background-color: #FAF9F5;
+        }
+
+        td code {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            background: #ECE6DA;
+            padding: 2px 6px;
+            border-radius: 2px;
+            color: var(--on-surface);
+        }
+
+        /* Status text for provisioning */
+        #prov-status {
+            font-family: var(--font-mono);
+            font-size: 13px;
+            background: #FAF7F0;
+            border-left: 3px solid var(--primary);
+            padding: 8px 12px;
+            margin: 12px 0 16px 0;
+            color: var(--on-surface);
+        }
+
+        /* Badges */
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            font-family: var(--font-display);
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            border-radius: 2px;
+        }
+        .badge-active {
+            background: var(--secondary);
+            color: var(--neutral);
+        }
+        .badge-inactive {
+            background: var(--tertiary);
+            color: var(--neutral);
+        }
+
+        @media (max-width: 767px) {
+            body {
+                padding: 16px 10px;
+            }
+            .card {
+                padding: 16px 12px;
+            }
+            header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 12px;
+            }
+            form {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            input[type="text"],
+            input[type="number"],
+            input[type="password"],
+            select,
+            button {
+                width: 100%;
+            }
+        }
     </style>
 </head>
 <body>
-    <div style="display: flex; justify-content: space-between; align-items: center;">
-        <h1>Access Control Admin Dashboard</h1>
-        <div id="session-info" style="font-size: 0.9em; color: #475569;">
-            <a href="/me" style="color: #4f46e5; text-decoration: none; font-weight: 500;">&larr; Self-Service Key Portal</a>
-            <span id="whoami" style="margin-left: 12px;"></span>
+    <div class="container">
+        <header>
+            <div class="brand-block">
+                <span class="ref-kicker">REF. ACCESS // ADMIN 02</span>
+                <h1>Access Admin Control<span class="dot">.</span></h1>
+            </div>
+            <div id="session-info">
+                <a href="/me">&larr; Self-Service Key Portal</a>
+                <span id="whoami"></span>
+            </div>
+        </header>
+
+        <div id="auth-banner">
+            <label for="admin-token-input">Admin Token:</label>
+            <input type="password" id="admin-token-input" placeholder="Bearer Token (e.g. admintest123)">
+            <button id="save-token-btn" onclick="saveToken()">Save Token</button>
+            <span id="auth-status"></span>
         </div>
+
+        <div id="error" class="error"></div>
+
+        <!-- 1. PROVISIONING (Moved to TOP of content area) -->
+        <section id="provision" class="card">
+            <div class="card-header">
+                <h2>Provisioning (Tap-to-Enroll)</h2>
+                <span class="card-ref">FIG. 01 · WRITER DISPATCH</span>
+            </div>
+            <form id="provision-form">
+                <select id="prov-device"></select>
+                <select id="prov-member"></select>
+                <label><input type="checkbox" id="prov-wildcard" checked> Wildcard (bind on tap)</label>
+                <input type="text" id="prov-uid" placeholder="UID (hex, fixed-uid mode)" disabled>
+                <button type="submit" id="prov-arm">Arm writer</button>
+                <button type="button" id="prov-cancel" disabled>Cancel</button>
+            </form>
+            <p id="prov-status">Idle.</p>
+            <div class="table-wrap">
+                <table id="prov-jobs-table">
+                    <tr><th>Job</th><th>Device</th><th>Member</th><th>UID</th><th>Created</th><th>Expires</th><th>Action</th></tr>
+                </table>
+            </div>
+        </section>
+
+        <!-- 2. TAGS -->
+        <section class="card">
+            <div class="card-header">
+                <h2>Tags</h2>
+                <span class="card-ref">FIG. 02 · NFC NTAG 424 ROSTER</span>
+            </div>
+            <div class="table-wrap">
+                <table id="tags-table">
+                    <tr><th>UID</th><th>Member Key</th><th>Status</th><th>Version</th><th>Counter</th><th>Enrolled</th><th>Action</th></tr>
+                </table>
+            </div>
+
+            <h3>Enroll Tag</h3>
+            <form id="enroll-form">
+                <input type="text" id="enroll-uid" placeholder="UID (hex)" required>
+                <input type="text" id="enroll-member" placeholder="Member Key" required>
+                <input type="number" id="enroll-version" placeholder="Key Version" value="1" required>
+                <button type="submit">Enroll</button>
+            </form>
+        </section>
+
+        <!-- 3. MEMBERS -->
+        <section class="card">
+            <div class="card-header">
+                <h2>Members</h2>
+                <span class="card-ref">FIG. 03 · AUTHENTIK SYNC</span>
+            </div>
+            <div class="table-wrap">
+                <table id="members-table">
+                    <tr><th>Member Key</th><th>Display Name</th><th>Active Until</th><th>Source</th></tr>
+                </table>
+            </div>
+        </section>
+
+        <!-- 4. DEVICES -->
+        <section class="card">
+            <div class="card-header">
+                <h2>Devices</h2>
+                <span class="card-ref">FIG. 04 · READER / WRITER HARDWARE</span>
+            </div>
+            <div class="table-wrap">
+                <table id="devices-table">
+                    <tr><th>Device ID</th><th>Role</th><th>Offline Verify</th><th>Presence</th><th>Last Seen</th></tr>
+                </table>
+            </div>
+
+            <h3>Upsert Device</h3>
+            <form id="device-form">
+                <input type="text" id="dev-id" placeholder="Device ID" required>
+                <input type="text" id="dev-role" placeholder="Role (e.g. door)" required>
+                <label><input type="checkbox" id="dev-offline"> Offline Verify</label>
+                <button type="submit">Save Device</button>
+            </form>
+        </section>
+
+        <!-- 5. OVERRIDES -->
+        <section class="card">
+            <div class="card-header">
+                <h2>Overrides</h2>
+                <span class="card-ref">FIG. 05 · ACCESS POLICIES & BANS</span>
+            </div>
+            <div class="table-wrap">
+                <table id="overrides-table">
+                    <tr><th>ID</th><th>Member</th><th>UID</th><th>Kind</th><th>Expires</th><th>Note</th><th>Created</th></tr>
+                </table>
+            </div>
+
+            <h3>Create Override</h3>
+            <form id="override-form">
+                <input type="text" id="ov-member" placeholder="Member Key (optional)">
+                <input type="text" id="ov-uid" placeholder="UID (optional)">
+                <select id="ov-kind"><option value="ban">Ban</option><option value="allow">Allow</option></select>
+                <input type="text" id="ov-expires" placeholder="Expires At (ISO8601, optional)">
+                <input type="text" id="ov-note" placeholder="Note">
+                <button type="submit">Create</button>
+            </form>
+        </section>
+
+        <!-- 6. AUDIT LOG -->
+        <section class="card">
+            <div class="card-header">
+                <h2>Audit Log (Recent 50)</h2>
+                <span class="card-ref">FIG. 06 · SYSTEM TAP LOG</span>
+            </div>
+            <div class="table-wrap">
+                <table id="audit-table">
+                    <tr><th>ID</th><th>Time</th><th>Device</th><th>UID</th><th>Counter</th><th>Decision</th><th>Reason</th></tr>
+                </table>
+            </div>
+        </section>
     </div>
-    <div id="auth-banner" style="background: #eef2ff; border: 1px solid #c7d2fe; padding: 10px 15px; margin-bottom: 20px; border-radius: 6px; display: flex; align-items: center; gap: 10px;">
-        <label for="admin-token-input" style="font-weight: bold; color: #3730a3;">Admin Token:</label>
-        <input type="password" id="admin-token-input" placeholder="Bearer Token (e.g. admintest123)" style="flex: 1; max-width: 350px; padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 4px;">
-        <button id="save-token-btn" onclick="saveToken()" style="padding: 6px 14px; background: #4f46e5; color: white; border: none; border-radius: 4px; cursor: pointer;">Save Token</button>
-        <span id="auth-status" style="font-size: 0.9em; color: #475569;"></span>
-    </div>
-    <div id="error" class="error"></div>
-
-    <h2>Tags</h2>
-    <table id="tags-table">
-        <tr><th>UID</th><th>Member Key</th><th>Status</th><th>Version</th><th>Counter</th><th>Enrolled</th><th>Action</th></tr>
-    </table>
-    
-    <h3>Enroll Tag</h3>
-    <form id="enroll-form">
-        <input type="text" id="enroll-uid" placeholder="UID (hex)" required>
-        <input type="text" id="enroll-member" placeholder="Member Key" required>
-        <input type="number" id="enroll-version" placeholder="Key Version" value="1" required>
-        <button type="submit">Enroll</button>
-    </form>
-
-    <h2>Members</h2>
-    <table id="members-table">
-        <tr><th>Member Key</th><th>Display Name</th><th>Active Until</th><th>Source</th></tr>
-    </table>
-
-    <h2>Devices</h2>
-    <table id="devices-table">
-        <tr><th>Device ID</th><th>Role</th><th>Offline Verify</th><th>Presence</th><th>Last Seen</th></tr>
-    </table>
-
-    <h3>Upsert Device</h3>
-    <form id="device-form">
-        <input type="text" id="dev-id" placeholder="Device ID" required>
-        <input type="text" id="dev-role" placeholder="Role (e.g. door)" required>
-        <label><input type="checkbox" id="dev-offline"> Offline Verify</label>
-        <button type="submit">Save Device</button>
-    </form>
-
-    <h2>Overrides</h2>
-    <table id="overrides-table">
-        <tr><th>ID</th><th>Member</th><th>UID</th><th>Kind</th><th>Expires</th><th>Note</th><th>Created</th></tr>
-    </table>
-
-    <h3>Create Override</h3>
-    <form id="override-form">
-        <input type="text" id="ov-member" placeholder="Member Key (optional)">
-        <input type="text" id="ov-uid" placeholder="UID (optional)">
-        <select id="ov-kind"><option value="ban">Ban</option><option value="allow">Allow</option></select>
-        <input type="text" id="ov-expires" placeholder="Expires At (ISO8601, optional)">
-        <input type="text" id="ov-note" placeholder="Note">
-        <button type="submit">Create</button>
-    </form>
-
-    <h2>Audit Log (Recent 50)</h2>
-    <table id="audit-table">
-        <tr><th>ID</th><th>Time</th><th>Device</th><th>UID</th><th>Counter</th><th>Decision</th><th>Reason</th></tr>
-    </table>
-
-    <section id="provision">
-        <h2>Provisioning (Tap-to-Enroll)</h2>
-        <form id="provision-form">
-            <select id="prov-device"></select>
-            <select id="prov-member"></select>
-            <label><input type="checkbox" id="prov-wildcard" checked> Wildcard (bind on tap)</label>
-            <input type="text" id="prov-uid" placeholder="UID (hex, fixed-uid mode)" disabled>
-            <button type="submit" id="prov-arm">Arm writer</button>
-            <button type="button" id="prov-cancel" disabled>Cancel</button>
-        </form>
-        <p id="prov-status">Idle.</p>
-        <table id="prov-jobs-table">
-            <tr><th>Job</th><th>Device</th><th>Member</th><th>UID</th><th>Created</th><th>Expires</th><th>Action</th></tr>
-        </table>
-    </section>
 
     <script>
         function getToken() {
@@ -163,7 +719,7 @@
                 tbody.innerHTML = '<tr><th>UID</th><th>Member Key</th><th>Status</th><th>Version</th><th>Counter</th><th>Enrolled</th><th>Action</th></tr>';
                 tags.forEach(t => {
                     const tr = document.createElement('tr');
-                    tr.innerHTML = `<td>${t.uid}</td><td>${t.member_key}</td><td>${t.status}</td><td>${t.key_version}</td><td>${t.last_counter}</td><td>${t.enrolled_at}</td>
+                    tr.innerHTML = `<td><code>${t.uid}</code></td><td><code>${t.member_key}</code></td><td>${t.status}</td><td>${t.key_version}</td><td>${t.last_counter}</td><td>${t.enrolled_at}</td>
                     <td><button onclick="revoke('${t.uid}')">Revoke</button></td>`;
                     tbody.appendChild(tr);
                 });
@@ -174,7 +730,7 @@
                 tbody.innerHTML = '<tr><th>Member Key</th><th>Display Name</th><th>Active Until</th><th>Source</th></tr>';
                 members.forEach(m => {
                     const tr = document.createElement('tr');
-                    tr.innerHTML = `<td>${m.member_key}</td><td>${m.display_name||''}</td><td>${m.active_until}</td><td>${m.source}</td>`;
+                    tr.innerHTML = `<td><code>${m.member_key}</code></td><td>${m.display_name||''}</td><td>${m.active_until}</td><td>${m.source}</td>`;
                     tbody.appendChild(tr);
                 });
             });
@@ -184,7 +740,7 @@
                 tbody.innerHTML = '<tr><th>Device ID</th><th>Role</th><th>Offline Verify</th><th>Presence</th><th>Last Seen</th></tr>';
                 devices.forEach(d => {
                     const tr = document.createElement('tr');
-                    tr.innerHTML = `<td>${d.device_id}</td><td>${d.role}</td><td>${d.offline_verify}</td><td>${d.presence}</td><td>${d.last_seen||''}</td>`;
+                    tr.innerHTML = `<td><code>${d.device_id}</code></td><td>${d.role}</td><td>${d.offline_verify}</td><td>${d.presence}</td><td>${d.last_seen||''}</td>`;
                     tbody.appendChild(tr);
                 });
             });
@@ -194,7 +750,7 @@
                 tbody.innerHTML = '<tr><th>ID</th><th>Member</th><th>UID</th><th>Kind</th><th>Expires</th><th>Note</th><th>Created</th></tr>';
                 ovs.forEach(o => {
                     const tr = document.createElement('tr');
-                    tr.innerHTML = `<td>${o.id}</td><td>${o.member_key||''}</td><td>${o.uid||''}</td><td>${o.kind}</td><td>${o.expires_at||''}</td><td>${o.note||''}</td><td>${o.created_at}</td>`;
+                    tr.innerHTML = `<td>${o.id}</td><td>${o.member_key ? '<code>'+o.member_key+'</code>' : ''}</td><td>${o.uid ? '<code>'+o.uid+'</code>' : ''}</td><td>${o.kind}</td><td>${o.expires_at||''}</td><td>${o.note||''}</td><td>${o.created_at}</td>`;
                     tbody.appendChild(tr);
                 });
             });
@@ -204,7 +760,7 @@
                 tbody.innerHTML = '<tr><th>ID</th><th>Time</th><th>Device</th><th>UID</th><th>Counter</th><th>Decision</th><th>Reason</th></tr>';
                 logs.forEach(l => {
                     const tr = document.createElement('tr');
-                    tr.innerHTML = `<td>${l.id}</td><td>${l.ts}</td><td>${l.device_id||''}</td><td>${l.uid||''}</td><td>${l.counter||''}</td><td>${l.decision}</td><td>${l.reason}</td>`;
+                    tr.innerHTML = `<td>${l.id}</td><td>${l.ts}</td><td>${l.device_id ? '<code>'+l.device_id+'</code>' : ''}</td><td>${l.uid ? '<code>'+l.uid+'</code>' : ''}</td><td>${l.counter||''}</td><td>${l.decision}</td><td>${l.reason}</td>`;
                     tbody.appendChild(tr);
                 });
             });
@@ -253,7 +809,7 @@
             tbody.innerHTML = '<tr><th>Job</th><th>Device</th><th>Member</th><th>UID</th><th>Created</th><th>Expires</th><th>Action</th></tr>';
             jobs.forEach(j => {
                 const tr = document.createElement('tr');
-                tr.innerHTML = `<td>${j.job_id.slice(0, 8)}…</td><td>${j.device_id}</td><td>${j.member_key}</td><td>${j.uid === '' ? '(wildcard)' : j.uid}</td><td>${j.created_at}</td><td>${j.expires_at}</td>
+                tr.innerHTML = `<td>${j.job_id.slice(0, 8)}…</td><td><code>${j.device_id}</code></td><td><code>${j.member_key}</code></td><td>${j.uid === '' ? '(wildcard)' : '<code>'+j.uid+'</code>'}</td><td>${j.created_at}</td><td>${j.expires_at}</td>
                 <td><button onclick="provCancel('${j.job_id}')">Cancel</button></td>`;
                 tbody.appendChild(tr);
             });
@@ -384,7 +940,7 @@
                     const data = await res.json();
                     if (data && data.principal) {
                         const whoami = document.getElementById('whoami');
-                        whoami.innerHTML = `Signed in as <strong>${data.principal.username}</strong> <span style="background:#e0e7ff; color:#4338ca; padding:2px 6px; border-radius:4px; font-size:0.8em;">Admin Session</span>`;
+                        whoami.innerHTML = `Signed in as <strong>${data.principal.username}</strong> <span style="background:var(--surface-dark); color:var(--primary); border:1px solid var(--primary); padding:2px 6px; border-radius:2px; font-size:0.8em; font-family:var(--font-display); text-transform:uppercase; letter-spacing:0.04em;">Admin Session</span>`;
                     }
                 }
             } catch (e) {}

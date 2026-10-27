@@ -61,6 +61,19 @@ impl Store {
     fn apply_schema_to(conn: &Connection) -> rusqlite::Result<()> {
         let schema = include_str!("../schema.sql");
         conn.execute_batch(schema)?;
+
+        // v0.4.0 migration: phone column for the SUN tap landing page.
+        // CREATE TABLE IF NOT EXISTS does not extend pre-existing tables, so
+        // the column is added conditionally.
+        let has_phone: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('members') WHERE name = 'phone')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_phone {
+            conn.execute("ALTER TABLE members ADD COLUMN phone TEXT", [])?;
+        }
+
         Ok(())
     }
 
@@ -278,7 +291,11 @@ impl Store {
 
         let active_until = match active_until {
             Some(au) => au,
-            None => return Ok(AccessDecision::Denied("unknown_member".to_string())),
+            // Roster absence (sync removed the member — e.g. they left the
+            // Authentik membership group) means the membership is no longer
+            // current. Report it as inactive rather than "unknown": the tag
+            // itself is known and enrolled, it is the membership that lapsed.
+            None => return Ok(AccessDecision::Denied("member_inactive".to_string())),
         };
 
         let grace_days = self
@@ -336,6 +353,41 @@ impl Store {
                  WHERE t.uid = ?1",
                 params![uid],
                 |row| row.get(0),
+            )
+            .optional()
+    }
+
+    /// Single tag lookup by UID (any status).
+    pub fn tag_by_uid(&self, uid: &str) -> rusqlite::Result<Option<TagInfo>> {
+        self.conn
+            .query_row(
+                "SELECT uid, member_key, status, key_version, last_counter, enrolled_at
+                 FROM tags WHERE uid = ?1",
+                params![uid],
+                |r| {
+                    Ok(TagInfo {
+                        uid: r.get(0)?,
+                        member_key: r.get(1)?,
+                        status: r.get(2)?,
+                        key_version: r.get(3)?,
+                        last_counter: r.get(4)?,
+                        enrolled_at: r.get(5)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    /// Roster contact for a member: display name plus phone (when synced).
+    pub fn member_contact(
+        &self,
+        member_key: &str,
+    ) -> rusqlite::Result<Option<(String, Option<String>)>> {
+        self.conn
+            .query_row(
+                "SELECT display_name, phone FROM members WHERE member_key = ?1",
+                params![member_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
     }

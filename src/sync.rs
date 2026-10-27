@@ -51,6 +51,26 @@ pub struct SyncStats {
 pub struct AuthentikUser {
     pub username: String,
     pub name: Option<String>,
+    /// Raw authentik user attributes. The phone shown on the SUN tap landing
+    /// page lives at `attributes.civicrm.phone` (written by the CiviCRM sync
+    /// login policy); a bare `attributes.phone` is honored as a fallback.
+    #[serde(default)]
+    pub attributes: Option<serde_json::Value>,
+}
+
+/// Best-effort phone extraction from authentik user attributes.
+fn phone_from_attributes(attributes: Option<&serde_json::Value>) -> Option<String> {
+    let attrs = attributes?;
+    let civicrm_phone = attrs
+        .get("civicrm")
+        .and_then(|c| c.get("phone"))
+        .and_then(|p| p.as_str());
+    let bare_phone = attrs.get("phone").and_then(|p| p.as_str());
+    civicrm_phone
+        .or(bare_phone)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -172,14 +192,16 @@ async fn apply_users(store: Arc<Mutex<Store>>, users: Vec<AuthentikUser>) -> Res
                 Some(name) if !name.is_empty() => name.to_string(),
                 _ => user.username.clone(),
             };
+            let phone = phone_from_attributes(user.attributes.as_ref());
             tx.execute(
-                "INSERT INTO members (member_key, display_name, active_until, source)
-                 VALUES (?1, ?2, ?3, 'authentik')
+                "INSERT INTO members (member_key, display_name, active_until, source, phone)
+                 VALUES (?1, ?2, ?3, 'authentik', ?4)
                  ON CONFLICT(member_key) DO UPDATE SET
                    display_name = excluded.display_name,
                    active_until = excluded.active_until,
-                   source = 'authentik'",
-                params![user.username, display_name, active_until],
+                   source = 'authentik',
+                   phone = COALESCE(excluded.phone, members.phone)",
+                params![user.username, display_name, active_until, phone],
             )
             .context("Failed to upsert member")?;
             seen.insert(user.username.clone());

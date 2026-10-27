@@ -168,10 +168,11 @@ fn test_effective_access() {
 
     store.enroll_tag(uid, member_key, 1, ts).unwrap();
 
-    // 2. Unknown member
+    // 2. Roster row missing (sync removed the member) — the tag is known but
+    // the membership is no longer current, so it reports member_inactive.
     assert_eq!(
         store.effective_access(uid, ts).unwrap(),
-        AccessDecision::Denied("unknown_member".to_string())
+        AccessDecision::Denied("member_inactive".to_string())
     );
 
     // Insert member

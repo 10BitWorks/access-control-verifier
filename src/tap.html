@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>10BitWorks — Key Tap</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            /* 10BitWorks Blueprint System tokens */
+            --primary: #C9952A;          /* Dark Brass */
+            --primary-hover: #B8861F;
+            --primary-pressed: #A87A1F;
+            --secondary: #3A5A7C;        /* Draft Blue */
+            --tertiary: #8B3A2A;         /* Anvil Red */
+            --neutral: #F5F0E6;          /* Blueprint Linen ground */
+            --surface: #FFFFFF;          /* Card surface */
+            --surface-dark: #302922;     /* Shop Dark */
+            --on-surface: #1A1A1A;       /* Carbon Black */
+            --on-surface-muted: #6E655B; /* Cinder */
+            --on-surface-dark: #F5F0E6;
+            --on-surface-dark-muted: #BDB6A7;
+            --outline: #D1D1D1;          /* Light Gray */
+
+            --font-display: 'Barlow Condensed', sans-serif;
+            --font-body: 'Barlow', sans-serif;
+            --font-mono: 'JetBrains Mono', monospace;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            font-family: var(--font-body);
+            font-size: 17px;
+            line-height: 1.6;
+            background-color: var(--neutral);
+            color: var(--on-surface);
+            margin: 0;
+            padding: 32px 16px;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .container { max-width: 640px; margin: 0 auto; }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+            margin-bottom: 28px;
+            border-bottom: 2px solid var(--on-surface);
+            padding-bottom: 16px;
+        }
+
+        .ref-kicker {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: var(--primary);
+            display: block;
+            margin-bottom: 4px;
+        }
+
+        h1 {
+            font-family: var(--font-display);
+            font-size: 2.2rem;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            margin: 0;
+            color: var(--on-surface);
+        }
+
+        h1 .dot { color: var(--primary); }
+
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--outline);
+            border-radius: 2px;
+            padding: 24px;
+            margin-bottom: 20px;
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            border-bottom: 1px solid var(--outline);
+            padding-bottom: 10px;
+            margin-bottom: 16px;
+        }
+
+        .card-header h2 {
+            font-family: var(--font-display);
+            font-size: 1.4rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            margin: 0;
+        }
+
+        .card-ref {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            letter-spacing: 2px;
+            color: var(--on-surface-muted);
+            text-transform: uppercase;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 16px;
+        }
+
+        .stat-item { display: flex; flex-direction: column; }
+
+        .stat-label {
+            font-family: var(--font-display);
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--on-surface-muted);
+            margin-bottom: 4px;
+        }
+
+        .stat-value {
+            font-size: 1.1rem;
+            font-weight: 600;
+            word-break: break-word;
+        }
+
+        .stat-value.mono { font-family: var(--font-mono); font-size: 0.95rem; }
+
+        .badge {
+            display: inline-block;
+            font-family: var(--font-display);
+            font-weight: 700;
+            font-size: 13px;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            padding: 3px 10px;
+            border-radius: 2px;
+        }
+
+        .badge-active { background: var(--on-surface); color: var(--neutral); }
+        .badge-expired { background: transparent; color: var(--tertiary); border: 1px solid var(--tertiary); }
+
+        .actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-top: 4px;
+        }
+
+        .btn {
+            display: inline-block;
+            font-family: var(--font-display);
+            font-weight: 700;
+            font-size: 15px;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            padding: 10px 24px;
+            border-radius: 2px;
+            border: 2px solid transparent;
+            cursor: pointer;
+            text-decoration: none;
+            text-align: center;
+            transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+        }
+
+        .btn-primary { background: var(--primary); color: var(--on-surface); }
+        .btn-primary:hover { background: var(--primary-hover); }
+        .btn-primary:active { background: var(--primary-pressed); }
+
+        .btn-danger {
+            background: transparent;
+            color: var(--tertiary);
+            border-color: var(--tertiary);
+        }
+        .btn-danger:hover:not(:disabled) { background: var(--tertiary); color: var(--neutral); }
+        .btn-danger:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .footnote {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            letter-spacing: 1px;
+            color: var(--on-surface-muted);
+            margin-top: 18px;
+        }
+
+        .notice {
+            font-size: 0.95rem;
+            color: var(--tertiary);
+            margin: 0 0 16px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div>
+                <span class="ref-kicker">REF. ACCESS // TAP 03</span>
+                <h1>10BitWorks Key Tap<span class="dot">.</span></h1>
+            </div>
+        </header>
+
+        __GENERIC_BLOCK__
+
+        <div id="tap-content" style="display:none;">
+            <div class="card">
+                <div class="card-header">
+                    <h2>Key Holder</h2>
+                    <span class="card-ref">FIG. 01 · ROSTER</span>
+                </div>
+                <div class="grid">
+                    <div class="stat-item">
+                        <span class="stat-label">Member</span>
+                        <span class="stat-value" id="member-name">__MEMBER_NAME__</span>
+                    </div>
+                    <div class="stat-item" __PHONE_HIDDEN__>
+                        <span class="stat-label">Phone</span>
+                        <span class="stat-value" id="member-phone">__PHONE__</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Door Status</span>
+                        <span class="stat-value"><span class="badge __STATUS_CLASS__" id="door-status">__STATUS__</span></span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h2>Card Metadata</h2>
+                    <span class="card-ref">FIG. 02 · NTAG 424</span>
+                </div>
+                __STALE_NOTICE__
+                <div class="grid">
+                    <div class="stat-item">
+                        <span class="stat-label">Tap Counter</span>
+                        <span class="stat-value mono" id="tap-counter">__COUNTER__</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Enrolled</span>
+                        <span class="stat-value mono" id="enrolled-at">__ENROLLED__</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Key Version</span>
+                        <span class="stat-value mono" id="key-version">__KEY_VERSION__</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Card UID</span>
+                        <span class="stat-value mono" id="card-uid">__UID__</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h2>Actions</h2>
+                    <span class="card-ref">FIG. 03 · SELF SERVICE</span>
+                </div>
+                <div class="actions">
+                    <a class="btn btn-primary" href="https://auth.10bitworks.org/my/applications">Open 10Bit Apps</a>
+                    <button class="btn btn-danger" id="btn-report-lost">Report Lost Key</button>
+                </div>
+                <p class="footnote">REPORT LOST KEY DEACTIVATES THIS CARD IMMEDIATELY AND ALERTS A 10BITWORKS ADMIN ON SLACK.</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        (function () {
+            var uid = '__UID__';
+            var c = '__C__';
+            var cmac = '__CMAC__';
+            var btn = document.getElementById('btn-report-lost');
+            if (!btn) return;
+            btn.addEventListener('click', function () {
+                if (!confirm('Deactivate this key card NOW?\n\nThis cannot be undone from this page — a 10BitWorks admin must re-provision a replacement.')) return;
+                btn.disabled = true;
+                btn.textContent = 'Reporting…';
+                fetch('/tap/report-lost', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ uid: uid, c: c, cmac: cmac })
+                }).then(function (res) {
+                    return res.json().then(function (body) { return { ok: res.ok, body: body }; });
+                }).then(function (r) {
+                    if (r.ok && r.body.ok) {
+                        btn.textContent = r.body.message || 'Key Deactivated';
+                        var status = document.getElementById('door-status');
+                        if (status) { status.textContent = 'Deactivated'; status.className = 'badge badge-expired'; }
+                    } else {
+                        btn.disabled = false;
+                        btn.textContent = r.body.error || 'Report Failed — Try Again';
+                    }
+                }).catch(function () {
+                    btn.disabled = false;
+                    btn.textContent = 'Network Error — Try Again';
+                });
+            });
+        })();
+    </script>
+</body>
+</html>

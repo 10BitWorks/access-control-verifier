@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS tags (
 CREATE TABLE IF NOT EXISTS members (
     member_key TEXT PRIMARY KEY,
     display_name TEXT,
+    phone TEXT,
     active_until TEXT NOT NULL,
     source TEXT NOT NULL DEFAULT 'authentik'
 );

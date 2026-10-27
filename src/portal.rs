@@ -1,4 +1,6 @@
 use crate::api::AppState;
+use crate::crypto::{diversify, verify_sun, SunCmac, TapCounter, Uid};
+use crate::store::{AccessDecision, TapOutcome};
 use crate::writer::job_payload;
 use axum::{
     extract::{FromRequestParts, Query, State},
@@ -392,7 +394,8 @@ pub fn router(app_state: AppState) -> Router {
     };
 
     Router::new()
-        .route("/", get(root_redirect))
+        .route("/", get(root_handler))
+        .route("/tap/report-lost", post(tap_report_lost))
         .route("/auth/login", get(auth_login))
         .route("/auth/callback", get(auth_callback))
         .route("/auth/logout", post(auth_logout))
@@ -404,8 +407,300 @@ pub fn router(app_state: AppState) -> Router {
         .with_state(portal_state)
 }
 
-async fn root_redirect() -> Redirect {
-    Redirect::to("/me")
+// ---------------------------------------------------------------------------
+// SUN tap landing (public): a tapped NTAG 424 DNA card opens
+// https://keys.10bitworks.org/?uid=..&c=..&cmac=.. and the holder sees the
+// key's identity, live tap counter, and self-service actions — no sign-in
+// required. Possession of a valid (uid, counter, CMAC) triple IS the card.
+// ---------------------------------------------------------------------------
+
+/// NTAG 424 SUN tap counters are 24-bit.
+const TAP_MAX_COUNTER: u64 = 0xFF_FFFF;
+
+fn query_param<'q>(query: &'q str, name: &str) -> Option<&'q str> {
+    query.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k == name).then_some(v)
+    })
+}
+
+async fn root_handler(State(state): State<PortalState>, req: axum::extract::Request) -> Response {
+    let query = req.uri().query().unwrap_or("");
+    match (
+        query_param(query, "uid"),
+        query_param(query, "c"),
+        query_param(query, "cmac"),
+    ) {
+        (Some(uid), Some(c), Some(cmac)) => {
+            tap_landing(state, uid.to_string(), c.to_string(), cmac.to_string()).await
+        }
+        _ => Redirect::to("/me").into_response(),
+    }
+}
+
+/// Minimal HTML escaping for template interpolation.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// The generic "not recognized" page. Deliberately IDENTICAL for parse
+/// failures, unknown UIDs, and CMAC mismatches so the endpoint cannot be
+/// used as a validity oracle for guessed UIDs.
+fn tap_generic_page() -> Response {
+    Html(
+        include_str!("tap.html")
+            .replace(
+                "__GENERIC_BLOCK__",
+                r#"<div class="card">
+                <div class="card-header">
+                    <h2>Unrecognized Key</h2>
+                    <span class="card-ref">FIG. 00 · DENIED</span>
+                </div>
+                <p style="margin:0;">This key link is not recognized. If this is your card, contact a 10BitWorks admin, or sign in to the member portal.</p>
+                <div class="actions" style="margin-top:16px;">
+                    <a class="btn btn-primary" href="/auth/login">Sign In</a>
+                </div>
+            </div>"#,
+            )
+            .replace("__MEMBER_NAME__", "")
+            .replace("__PHONE__", "")
+            .replace("__PHONE_HIDDEN__", "hidden")
+            .replace("__STATUS__", "")
+            .replace("__STATUS_CLASS__", "")
+            .replace("__STALE_NOTICE__", "")
+            .replace("__COUNTER__", "")
+            .replace("__ENROLLED__", "")
+            .replace("__KEY_VERSION__", "")
+            .replace("__UID__", "")
+            .replace("__C__", "")
+            .replace("__CMAC__", ""),
+    )
+    .into_response()
+}
+
+async fn tap_landing(state: PortalState, uid_hex: String, c: String, cmac_hex: String) -> Response {
+    let Ok(uid) = Uid::from_hex(&uid_hex) else {
+        return tap_generic_page();
+    };
+    let Ok(tap_counter) = TapCounter::from_hex(&c) else {
+        return tap_generic_page();
+    };
+    let Ok(cmac) = SunCmac::from_hex(&cmac_hex) else {
+        return tap_generic_page();
+    };
+    let counter_u64 = tap_counter.to_u32() as u64;
+    if counter_u64 > TAP_MAX_COUNTER {
+        return tap_generic_page();
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Validate + record inside one store lock, mirroring the MQTT auth path.
+    let tap_view = {
+        let mut store = state.app_state.store.lock().expect("store lock poisoned");
+        let Some(tag) = store.tag_by_uid(&uid_hex).ok().flatten() else {
+            return tap_generic_page();
+        };
+        let tag_key = diversify(&state.app_state.master, &uid);
+        if verify_sun(&uid, &tap_counter, &cmac, &tag_key).is_err() {
+            return tap_generic_page();
+        }
+
+        let decision = store
+            .effective_access(&uid_hex, &now)
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "effective_access failed");
+                AccessDecision::Denied("member_inactive".to_string())
+            });
+        let outcome = store
+            .record_tap(&uid_hex, counter_u64 as i64, Some("web-tap"), &now, decision.clone())
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "record_tap failed");
+                TapOutcome::Denied("member_inactive".to_string())
+            });
+
+        let (stale, shown_counter) = match &outcome {
+            TapOutcome::Granted => (false, counter_u64 as i64),
+            TapOutcome::Denied(reason) if reason == "counter_replay" => {
+                // Stale link (counter already seen): still show the page, but
+                // display the card's authoritative stored counter.
+                let last = store
+                    .tag_by_uid(&uid_hex)
+                    .ok()
+                    .flatten()
+                    .map(|t| t.last_counter)
+                    .unwrap_or(counter_u64 as i64);
+                (true, last)
+            }
+            TapOutcome::Denied(_) => (false, counter_u64 as i64),
+        };
+
+        let contact = store.member_contact(&tag.member_key).ok().flatten();
+        (tag, decision, stale, shown_counter, contact)
+    };
+
+    let (tag, decision, stale, shown_counter, contact) = tap_view;
+    let (member_name, phone) = contact
+        .map(|(name, phone)| (if name.is_empty() { tag.member_key.clone() } else { name }, phone))
+        .unwrap_or_else(|| (tag.member_key.clone(), None));
+
+    let (status_label, status_class) = if tag.status != "active" {
+        ("Deactivated", "badge-expired")
+    } else {
+        match &decision {
+            AccessDecision::Granted => ("Active", "badge-active"),
+            AccessDecision::Denied(_) => ("Expired", "badge-expired"),
+        }
+    };
+
+    let stale_notice = if stale {
+        r#"<p class="notice">This tap link was already scanned — showing the card's stored counter.</p>"#
+    } else {
+        ""
+    };
+
+    Html(
+        include_str!("tap.html")
+            .replace("__GENERIC_BLOCK__", "")
+            .replace(
+                "<div id=\"tap-content\" style=\"display:none;\">",
+                "<div id=\"tap-content\">",
+            )
+            .replace("__MEMBER_NAME__", &html_escape(&member_name))
+            .replace(
+                "__PHONE__",
+                &html_escape(phone.as_deref().unwrap_or("")),
+            )
+            .replace("__PHONE_HIDDEN__", if phone.is_some() { "" } else { "hidden" })
+            .replace("__STATUS__", status_label)
+            .replace("__STATUS_CLASS__", status_class)
+            .replace("__STALE_NOTICE__", stale_notice)
+            .replace("__COUNTER__", &html_escape(&shown_counter.to_string()))
+            .replace("__ENROLLED__", &html_escape(&tag.enrolled_at))
+            .replace("__KEY_VERSION__", &html_escape(&tag.key_version.to_string()))
+            .replace("__UID__", &html_escape(&uid_hex))
+            .replace("__C__", &html_escape(&c))
+            .replace("__CMAC__", &html_escape(&cmac_hex)),
+    )
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReportLostBody {
+    uid: String,
+    c: String,
+    cmac: String,
+}
+
+/// Instant de-provisioning from the tap landing page. Re-validates the SUN
+/// CMAC (possession of the card == possession of the triple), then revokes
+/// the tag and notifies Slack. Replay-tolerant by design: the GET already
+/// recorded the counter, so the same triple is accepted here without
+/// recording a second tap.
+async fn tap_report_lost(
+    State(state): State<PortalState>,
+    Json(body): Json<ReportLostBody>,
+) -> Response {
+    let Ok(uid) = Uid::from_hex(&body.uid) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "error": "unrecognized key"}))).into_response();
+    };
+    let Ok(tap_counter) = TapCounter::from_hex(&body.c) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "error": "unrecognized key"}))).into_response();
+    };
+    let Ok(cmac) = SunCmac::from_hex(&body.cmac) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "error": "unrecognized key"}))).into_response();
+    };
+    let counter_i64 = tap_counter.to_u32() as i64;
+
+    let (member_key, member_name) = {
+        let mut store = state.app_state.store.lock().expect("store lock poisoned");
+        let Some(tag) = store.tag_by_uid(&body.uid).ok().flatten() else {
+            return (StatusCode::NOT_FOUND, Json(json!({"ok": false, "error": "unrecognized key"}))).into_response();
+        };
+        let tag_key = diversify(&state.app_state.master, &uid);
+        if verify_sun(&uid, &tap_counter, &cmac, &tag_key).is_err() {
+            return (StatusCode::NOT_FOUND, Json(json!({"ok": false, "error": "unrecognized key"}))).into_response();
+        }
+        if tag.status != "active" {
+            return (
+                StatusCode::OK,
+                Json(json!({"ok": true, "message": "Key was already deactivated."})),
+            )
+                .into_response();
+        }
+        if let Err(e) = store.revoke_tag(&body.uid) {
+            tracing::warn!(error = %e, "revoke_tag failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"ok": false, "error": "deactivation failed; try again"})),
+            )
+                .into_response();
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        let _ = store.audit_event(
+            &now,
+            Some("web-tap"),
+            Some(&body.uid),
+            Some(counter_i64),
+            "denied",
+            "reported_lost",
+        );
+        let name = store
+            .member_contact(&tag.member_key)
+            .ok()
+            .flatten()
+            .map(|(n, _)| n)
+            .unwrap_or_else(|| tag.member_key.clone());
+        (tag.member_key, name)
+    };
+
+    notify_slack(
+        &state.http_client,
+        format!(
+            ":key: *Lost key reported* — {}'s card `{}` was deactivated instantly after a web tap ({}, member `{}`).",
+            member_name, body.uid, chrono::Utc::now().to_rfc3339(), member_key
+        ),
+    )
+    .await;
+
+    (
+        StatusCode::OK,
+        Json(json!({"ok": true, "message": "Key deactivated"})),
+    )
+        .into_response()
+}
+
+/// Fire-and-forget Slack webhook post. Disabled when SLACK_WEBHOOK_URL is
+/// unset; failures are logged, never propagated.
+async fn notify_slack(client: &reqwest::Client, text: String) {
+    let Ok(url) = env::var("SLACK_WEBHOOK_URL") else {
+        tracing::warn!("SLACK_WEBHOOK_URL not set; Slack notification skipped");
+        return;
+    };
+    if url.is_empty() {
+        tracing::warn!("SLACK_WEBHOOK_URL empty; Slack notification skipped");
+        return;
+    }
+    let client = client.clone();
+    tokio::spawn(async move {
+        match client.post(&url).json(&json!({ "text": text })).send().await {
+            Ok(res) if res.status().is_success() => {}
+            Ok(res) => tracing::warn!(status = %res.status(), "Slack webhook post failed"),
+            Err(e) => tracing::warn!(error = %e, "Slack webhook post failed"),
+        }
+    });
 }
 
 async fn not_configured_page() -> Html<&'static str> {

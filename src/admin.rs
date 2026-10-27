@@ -154,6 +154,12 @@ async fn auth_middleware(
         }
     }
 
+    // No valid session at all: send browsers to the portal root (sign-in card),
+    // keep JSON errors for the fetch-based admin API.
+    if !req.uri().path().starts_with("/admin/api") {
+        return axum::response::Redirect::to("/").into_response();
+    }
+
     (
         StatusCode::UNAUTHORIZED,
         Json(json!({"error": "unauthorized"})),

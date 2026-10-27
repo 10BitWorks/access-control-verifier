@@ -683,6 +683,37 @@ async fn auth_callback(
     let roles = claims.roles.or(claims.groups).unwrap_or_default();
     tracing::info!(username = %username, ?roles, "OIDC user authenticated, issuing session cookie");
 
+    // New members must not wait for the hourly roster sync: if this user has
+    // no roster record yet, run a sync cycle right now so /me shows membership
+    // immediately. Failure to sync never blocks the login itself.
+    if let Ok(sync_cfg) = crate::sync::SyncConfig::from_env() {
+        if !sync_cfg.authentik_token.is_empty() && sync_cfg.authentik_token != "dummy" {
+            let member_exists = state
+                .app_state
+                .store
+                .lock()
+                .ok()
+                .and_then(|guard| guard.get_member(&username).ok())
+                .flatten()
+                .is_some();
+            if !member_exists {
+                match crate::sync::run_sync_cycle(state.app_state.store.clone(), &sync_cfg).await {
+                    Ok(stats) => tracing::info!(
+                        username = %username,
+                        added_or_updated = stats.added_or_updated,
+                        removed = stats.removed,
+                        "roster sync on first portal login"
+                    ),
+                    Err(e) => tracing::warn!(
+                        username = %username,
+                        error = %e,
+                        "roster sync on first portal login failed"
+                    ),
+                }
+            }
+        }
+    }
+
     // Create session JWT
     let now_ts = chrono::Utc::now().timestamp() as usize;
     let exp = now_ts + (cfg.session_lifetime_hours as usize * 3600);

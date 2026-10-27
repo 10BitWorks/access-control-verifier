@@ -168,11 +168,11 @@ fn test_effective_access() {
 
     store.enroll_tag(uid, member_key, 1, ts).unwrap();
 
-    // 2. Roster row missing (sync removed the member) — the tag is known but
-    // the membership is no longer current, so it reports member_inactive.
+    // 2. Roster row missing (sync removed the member) — the membership
+    // lapsed; the person is an ex-member now.
     assert_eq!(
         store.effective_access(uid, ts).unwrap(),
-        AccessDecision::Denied("member_inactive".to_string())
+        AccessDecision::Denied("expired_membership".to_string())
     );
 
     // Insert member
@@ -193,7 +193,7 @@ fn test_effective_access() {
     // 4. Over grace period
     assert_eq!(
         store.effective_access(uid, "2026-10-15T10:00:00Z").unwrap(),
-        AccessDecision::Denied("member_inactive".to_string())
+        AccessDecision::Denied("expired_membership".to_string())
     );
 
     // 5. Override allow (even if over grace)
@@ -211,7 +211,7 @@ fn test_effective_access() {
     // 6. Expired override allow
     assert_eq!(
         store.effective_access(uid, "2026-10-21T10:00:00Z").unwrap(),
-        AccessDecision::Denied("member_inactive".to_string())
+        AccessDecision::Denied("expired_membership".to_string())
     );
 
     // 7. Override ban (takes precedence over active member)

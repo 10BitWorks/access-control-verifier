@@ -57,7 +57,9 @@ fn error_response(status: StatusCode, message: &str) -> Response {
 pub fn map_store_reason(reason: &str) -> String {
     match reason {
         "tag_inactive" | "override_ban" => "override".to_string(),
-        "unknown_member" | "member_inactive" => "member_inactive".to_string(),
+        // Wire contract for readers stays "member_inactive"; the audit log
+        // carries the more precise "expired_membership".
+        "expired_membership" | "unknown_member" | "member_inactive" => "member_inactive".to_string(),
         known @ ("ok" | "unknown_tag" | "bad_cmac" | "counter_replay") => known.to_string(),
         other => {
             tracing::warn!(reason = other, "unmapped access reason");

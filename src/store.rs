@@ -292,10 +292,10 @@ impl Store {
         let active_until = match active_until {
             Some(au) => au,
             // Roster absence (sync removed the member — e.g. they left the
-            // Authentik membership group) means the membership is no longer
-            // current. Report it as inactive rather than "unknown": the tag
-            // itself is known and enrolled, it is the membership that lapsed.
-            None => return Ok(AccessDecision::Denied("member_inactive".to_string())),
+            // Authentik membership group) means the membership lapsed: the
+            // person is an ex-member. The tag itself is known and enrolled;
+            // it is the membership that expired.
+            None => return Ok(AccessDecision::Denied("expired_membership".to_string())),
         };
 
         let grace_days = self
@@ -315,7 +315,7 @@ impl Store {
         if is_within_grace {
             Ok(AccessDecision::Granted)
         } else {
-            Ok(AccessDecision::Denied("member_inactive".to_string()))
+            Ok(AccessDecision::Denied("expired_membership".to_string()))
         }
     }
 

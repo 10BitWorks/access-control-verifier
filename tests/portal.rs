@@ -767,7 +767,7 @@ async fn test_report_lost_bad_cmac_rejected() {
 }
 
 #[tokio::test]
-async fn test_denied_tap_reports_member_inactive_when_roster_row_missing() {
+async fn test_denied_tap_reports_expired_membership_when_roster_row_missing() {
     let f = setup_test_app();
     // Tag enrolled, but the member's roster row is gone (sync removed them).
     f.store
@@ -784,8 +784,8 @@ async fn test_denied_tap_reports_member_inactive_when_roster_row_missing() {
     let html = body["raw"].as_str().unwrap();
     assert!(html.contains("badge-expired"), "expired badge shown");
 
-    // The door path records the same semantics: roster absence is
-    // member_inactive, not unknown_member.
+    // The door path records the same semantics: roster absence means the
+    // membership lapsed — the person is an ex-member.
     let reason: String = f
         .store
         .lock()
@@ -797,5 +797,37 @@ async fn test_denied_tap_reports_member_inactive_when_roster_row_missing() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(reason, "member_inactive");
+    assert_eq!(reason, "expired_membership");
+}
+
+#[tokio::test]
+async fn test_web_tap_accepts_uppercase_card_uid() {
+    // NDEF mirrors carry UPPERCASE hex UIDs; the tags table stores lowercase.
+    // The tap landing must normalize (regression for the "Unrecognized Key"
+    // bug on real card taps).
+    let f = setup_test_app();
+    seed_member_with_tag(&f);
+    let master = Key::from_hex(MASTER_HEX).unwrap();
+    let (c, cmac) = sun_params(&master, 5);
+
+    let upper_uid = TAP_UID.to_ascii_uppercase();
+    let uri = format!("/?uid={upper_uid}&c={c}&cmac={cmac}");
+    let (status, body, _) = get_request(&f.app, &uri, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let html = body["raw"].as_str().unwrap();
+    assert!(html.contains("Alice Example"), "member rendered for uppercase UID");
+    assert!(!html.contains("Unrecognized Key"));
+
+    // Report-lost accepts the uppercase UID too.
+    let (status, body, _) = post_request(
+        &f.app,
+        "/tap/report-lost",
+        None,
+        json!({ "uid": upper_uid, "c": c, "cmac": cmac }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], true);
+    let tag = f.store.lock().unwrap().tag_by_uid(TAP_UID).unwrap().unwrap();
+    assert_eq!(tag.status, "revoked");
 }

@@ -489,7 +489,11 @@ fn tap_generic_page() -> Response {
     .into_response()
 }
 
-async fn tap_landing(state: PortalState, uid_hex: String, c: String, cmac_hex: String) -> Response {
+async fn tap_landing(state: PortalState, uid_param: String, c: String, cmac_hex: String) -> Response {
+    // Cards mirror their UID as UPPERCASE hex; the tags table stores
+    // lowercase. Normalize before any lookup (the MQTT door path does the
+    // same in api::auth).
+    let uid_hex = uid_param.to_ascii_lowercase();
     let Ok(uid) = Uid::from_hex(&uid_hex) else {
         return tap_generic_page();
     };
@@ -613,7 +617,9 @@ async fn tap_report_lost(
     State(state): State<PortalState>,
     Json(body): Json<ReportLostBody>,
 ) -> Response {
-    let Ok(uid) = Uid::from_hex(&body.uid) else {
+    // Cards mirror UIDs uppercase; the store keeps them lowercase.
+    let uid_lookup = body.uid.to_ascii_lowercase();
+    let Ok(uid) = Uid::from_hex(&uid_lookup) else {
         return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "error": "unrecognized key"}))).into_response();
     };
     let Ok(tap_counter) = TapCounter::from_hex(&body.c) else {
@@ -626,7 +632,7 @@ async fn tap_report_lost(
 
     let (member_key, member_name) = {
         let mut store = state.app_state.store.lock().expect("store lock poisoned");
-        let Some(tag) = store.tag_by_uid(&body.uid).ok().flatten() else {
+        let Some(tag) = store.tag_by_uid(&uid_lookup).ok().flatten() else {
             return (StatusCode::NOT_FOUND, Json(json!({"ok": false, "error": "unrecognized key"}))).into_response();
         };
         let tag_key = diversify(&state.app_state.master, &uid);
@@ -640,7 +646,7 @@ async fn tap_report_lost(
             )
                 .into_response();
         }
-        if let Err(e) = store.revoke_tag(&body.uid) {
+        if let Err(e) = store.revoke_tag(&uid_lookup) {
             tracing::warn!(error = %e, "revoke_tag failed");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -652,7 +658,7 @@ async fn tap_report_lost(
         let _ = store.audit_event(
             &now,
             Some("web-tap"),
-            Some(&body.uid),
+            Some(&uid_lookup),
             Some(counter_i64),
             "denied",
             "reported_lost",
@@ -695,7 +701,14 @@ async fn notify_slack(client: &reqwest::Client, text: String) {
     }
     let client = client.clone();
     tokio::spawn(async move {
-        match client.post(&url).json(&json!({ "text": text })).send().await {
+        // Slack workflow trigger payload: {"message": "..."} (not the
+        // incoming-webhook {"text": ...} shape).
+        match client
+            .post(&url)
+            .json(&json!({ "message": text }))
+            .send()
+            .await
+        {
             Ok(res) if res.status().is_success() => {}
             Ok(res) => tracing::warn!(status = %res.status(), "Slack webhook post failed"),
             Err(e) => tracing::warn!(error = %e, "Slack webhook post failed"),

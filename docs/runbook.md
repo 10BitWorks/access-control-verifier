@@ -366,7 +366,7 @@ Authentik group, which reads as a lapsed membership), not `unknown_member`.
   `ghcr.io/10bitworks/access-control-verifier:X.Y.Z` → on prod swap the `image:`
   tag in `compose.yaml` → `docker compose pull && docker compose up -d` → wait
   for `(healthy)` in `docker ps`.
-- **Current image**: `0.4.0` (SUN tap landing + lost-key reporting, admin
+- **Current image**: `0.4.1` (SUN tap landing + lost-key reporting, admin
   Blueprint restyle, roster sync on first login, phone sync).
 
 ### OIDC gotchas

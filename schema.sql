@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS tags (
     last_counter INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'active',
     note TEXT,
-    enrolled_at TEXT NOT NULL
+    enrolled_at TEXT NOT NULL,
+    entry_gen INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS members (
@@ -33,7 +34,8 @@ CREATE TABLE IF NOT EXISTS audit_log (
     uid TEXT,
     counter INTEGER,
     decision TEXT NOT NULL,
-    reason TEXT NOT NULL
+    reason TEXT NOT NULL,
+    member_key TEXT
 );
 
 CREATE TABLE IF NOT EXISTS overrides (
@@ -68,6 +70,38 @@ CREATE TABLE IF NOT EXISTS jobs (
     expires_at TEXT NOT NULL,
     consumed_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS tap_reports (
+    tap_id TEXT PRIMARY KEY,
+    device_id TEXT NOT NULL,
+    uid TEXT NOT NULL,
+    counter INTEGER NOT NULL,
+    decision TEXT,
+    reason TEXT,
+    time_uncertain INTEGER NOT NULL DEFAULT 0,
+    dev_ts TEXT,
+    recv_ts TEXT NOT NULL,
+    key_version INTEGER,
+    kind TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS anomalies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    device_id TEXT,
+    uid TEXT,
+    kind TEXT NOT NULL,
+    detail TEXT
+);
+
+CREATE TABLE IF NOT EXISTS roster_events (
+    roster_gen INTEGER NOT NULL,
+    uid TEXT NOT NULL,
+    entry_blob TEXT NOT NULL,
+    ts TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_roster_events_roster_gen ON roster_events(roster_gen);
 
 -- One ACTIVE tag per member: a valid key for an identity is singular, like
 -- a password. Enrollment is REPLACEMENT — provisioning a new tag revokes

@@ -1,6 +1,122 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
+use crate::sync_projection::{
+    RosterEntry, FLAG_EXPIRY_ABSENT, FLAG_OVERRIDDEN_ALLOW, FLAG_OVERRIDDEN_BAN, FLAG_REVOKED,
+    ROSTER_ENTRY_SIZE,
+};
+
+fn parse_uid_7(uid_str: &str) -> [u8; 7] {
+    let mut uid = [0u8; 7];
+    if let Ok(bytes) = hex::decode(uid_str) {
+        let len = bytes.len().min(7);
+        uid[..len].copy_from_slice(&bytes[..len]);
+    } else {
+        let bytes = uid_str.as_bytes();
+        let len = bytes.len().min(7);
+        uid[..len].copy_from_slice(&bytes[..len]);
+    }
+    uid
+}
+
+fn bump_roster_gen_in_tx(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<u64> {
+    let current_gen: i64 = tx
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM config WHERE key = 'roster_gen'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    let new_gen = (current_gen.max(0) as u64) + 1;
+    tx.execute(
+        "INSERT INTO config (key, value) VALUES ('roster_gen', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![new_gen.to_string()],
+    )?;
+    Ok(new_gen)
+}
+
+pub(crate) fn record_roster_event_for_tag_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    uid: &str,
+    timestamp: &str,
+) -> rusqlite::Result<u64> {
+    let new_roster_gen: u64 = bump_roster_gen_in_tx(tx)?;
+
+    let tag_row: Option<(String, i64, i64, String, i64)> = tx
+        .query_row(
+            "SELECT member_key, key_version, last_counter, status, entry_gen FROM tags WHERE uid = ?1",
+            params![uid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()?;
+
+    let Some((member_key, key_version, last_counter, status, entry_gen)) = tag_row else {
+        return Ok(new_roster_gen);
+    };
+
+    let active_until: Option<String> = tx
+        .query_row(
+            "SELECT active_until FROM members WHERE member_key = ?1",
+            params![member_key],
+            |r| r.get(0),
+        )
+        .optional()?;
+
+    let override_kind: Option<String> = tx
+        .query_row(
+            "SELECT kind FROM overrides
+             WHERE (uid = ?1 OR member_key = ?2)
+               AND (expires_at IS NULL OR expires_at > ?3)
+             ORDER BY id DESC LIMIT 1",
+            params![uid, member_key, timestamp],
+            |r| r.get(0),
+        )
+        .optional()?;
+
+    let mut flags = 0u8;
+    if status != "active" {
+        flags |= FLAG_REVOKED;
+    }
+    if let Some(kind) = override_kind {
+        if kind == "ban" {
+            flags |= FLAG_OVERRIDDEN_BAN;
+        } else if kind == "allow" {
+            flags |= FLAG_OVERRIDDEN_ALLOW;
+        }
+    }
+
+    let expiry_epoch = match active_until
+        .as_deref()
+        .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+    {
+        Some(dt) => dt.timestamp().max(0) as u32,
+        None => {
+            flags |= FLAG_EXPIRY_ABSENT;
+            0
+        }
+    };
+
+    let entry = RosterEntry {
+        uid: parse_uid_7(uid),
+        counter: last_counter as u32,
+        expiry_epoch,
+        key_version: key_version as u8,
+        entry_gen: entry_gen as u32,
+        flags,
+    };
+
+    let blob_hex = hex::encode(entry.to_bytes());
+    tx.execute(
+        "INSERT INTO roster_events (roster_gen, uid, entry_blob, ts)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![new_roster_gen as i64, uid, blob_hex, timestamp],
+    )?;
+
+    Ok(new_roster_gen)
+}
+
 // NOTE: This module is purely synchronous. Async wrappers must be applied at the call site
 // (e.g., using `tokio::task::spawn_blocking`) when calling from an async context.
 
@@ -43,6 +159,7 @@ impl Store {
             ("acl_expiry_days", "35"),
             ("acl_push_period_minutes", "60"),
             ("sync_interval_minutes", "60"),
+            ("roster_gen", "0"),
         ];
 
         for (k, v) in defaults {
@@ -74,6 +191,30 @@ impl Store {
             conn.execute("ALTER TABLE members ADD COLUMN phone TEXT", [])?;
         }
 
+        // v0.5.0 additive migrations (keygate-offline-first-reader S1 groundwork):
+        // 1. tags.entry_gen INTEGER NOT NULL DEFAULT 1
+        let has_entry_gen: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('tags') WHERE name = 'entry_gen')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_entry_gen {
+            conn.execute(
+                "ALTER TABLE tags ADD COLUMN entry_gen INTEGER NOT NULL DEFAULT 1",
+                [],
+            )?;
+        }
+
+        // 2. audit_log.member_key TEXT (nullable)
+        let has_member_key: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('audit_log') WHERE name = 'member_key')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_member_key {
+            conn.execute("ALTER TABLE audit_log ADD COLUMN member_key TEXT", [])?;
+        }
+
         Ok(())
     }
 
@@ -89,30 +230,59 @@ impl Store {
         // partial unique index (idx_tags_one_active_per_member) enforces the
         // invariant at the storage layer; this revoke must run first so the
         // upsert below does not collide with the member's previous tag.
+        let replaced_uids: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT uid FROM tags WHERE member_key = ?1 AND uid != ?2 AND status = 'active'",
+            )?;
+            let rows = stmt.query_map(params![member_key, uid], |r| r.get(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+
+        for r_uid in replaced_uids {
+            tx.execute(
+                "UPDATE tags SET status = 'revoked', entry_gen = entry_gen + 1 WHERE uid = ?1",
+                params![r_uid],
+            )?;
+            record_roster_event_for_tag_in_tx(&tx, &r_uid, timestamp)?;
+        }
+
         tx.execute(
-            "UPDATE tags SET status = 'revoked'
-             WHERE member_key = ?1 AND uid != ?2 AND status = 'active'",
-            params![member_key, uid],
-        )?;
-        tx.execute(
-            "INSERT INTO tags (uid, member_key, key_version, last_counter, status, enrolled_at)
-             VALUES (?1, ?2, ?3, 0, 'active', ?4)
+            "INSERT INTO tags (uid, member_key, key_version, last_counter, status, enrolled_at, entry_gen)
+             VALUES (?1, ?2, ?3, 0, 'active', ?4, 1)
              ON CONFLICT(uid) DO UPDATE SET
              member_key = excluded.member_key,
              key_version = excluded.key_version,
              status = 'active',
-             enrolled_at = excluded.enrolled_at",
+             enrolled_at = excluded.enrolled_at,
+             entry_gen = tags.entry_gen + 1",
             params![uid, member_key, key_version, timestamp],
         )?;
+        record_roster_event_for_tag_in_tx(&tx, uid, timestamp)?;
+
         tx.commit()?;
         Ok(())
     }
 
     pub fn revoke_tag(&mut self, uid: &str) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "UPDATE tags SET status = 'revoked' WHERE uid = ?1",
-            params![uid],
-        )?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let tx = self.conn.transaction()?;
+        let is_active: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM tags WHERE uid = ?1 AND status = 'active')",
+                params![uid],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+
+        if is_active {
+            tx.execute(
+                "UPDATE tags SET status = 'revoked', entry_gen = entry_gen + 1 WHERE uid = ?1",
+                params![uid],
+            )?;
+            record_roster_event_for_tag_in_tx(&tx, uid, &now)?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -132,6 +302,14 @@ impl Store {
         let current_counter: Option<i64> = tx
             .query_row(
                 "SELECT last_counter FROM tags WHERE uid = ?1",
+                params![uid],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let member_key: Option<String> = tx
+            .query_row(
+                "SELECT member_key FROM tags WHERE uid = ?1",
                 params![uid],
                 |row| row.get(0),
             )
@@ -173,9 +351,17 @@ impl Store {
         };
 
         tx.execute(
-            "INSERT INTO audit_log (ts, device_id, uid, counter, decision, reason)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![timestamp, device_id, uid, counter, decision_str, reason_str],
+            "INSERT INTO audit_log (ts, device_id, uid, counter, decision, reason, member_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                timestamp,
+                device_id,
+                uid,
+                counter,
+                decision_str,
+                reason_str,
+                member_key
+            ],
         )?;
 
         tx.commit()?;
@@ -336,10 +522,24 @@ impl Store {
         decision: &str,
         reason: &str,
     ) -> rusqlite::Result<()> {
+        self.audit_event_with_member(timestamp, device_id, uid, counter, decision, reason, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn audit_event_with_member(
+        &mut self,
+        timestamp: &str,
+        device_id: Option<&str>,
+        uid: Option<&str>,
+        counter: Option<i64>,
+        decision: &str,
+        reason: &str,
+        member_key: Option<&str>,
+    ) -> rusqlite::Result<()> {
         self.conn.execute(
-            "INSERT INTO audit_log (ts, device_id, uid, counter, decision, reason)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![timestamp, device_id, uid, counter, decision, reason],
+            "INSERT INTO audit_log (ts, device_id, uid, counter, decision, reason, member_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![timestamp, device_id, uid, counter, decision, reason, member_key],
         )?;
         Ok(())
     }
@@ -361,7 +561,7 @@ impl Store {
     pub fn tag_by_uid(&self, uid: &str) -> rusqlite::Result<Option<TagInfo>> {
         self.conn
             .query_row(
-                "SELECT uid, member_key, status, key_version, last_counter, enrolled_at
+                "SELECT uid, member_key, status, key_version, last_counter, enrolled_at, entry_gen
                  FROM tags WHERE uid = ?1",
                 params![uid],
                 |r| {
@@ -372,6 +572,7 @@ impl Store {
                         key_version: r.get(3)?,
                         last_counter: r.get(4)?,
                         enrolled_at: r.get(5)?,
+                        entry_gen: r.get(6)?,
                     })
                 },
             )
@@ -641,15 +842,15 @@ impl Store {
     /// Mark a job consumed without enrollment (writer failure or admin cancel).
     /// Audits `job_failed`. Returns `false` when the job is unknown.
     pub fn fail_job(&mut self, job_id: &str, now: &str, reason: &str) -> rusqlite::Result<bool> {
-        let row: Option<(String, String, Option<String>)> = self
+        let row: Option<(String, String, Option<String>, String)> = self
             .conn
             .query_row(
-                "SELECT device_id, uid, consumed_at FROM jobs WHERE job_id = ?1",
+                "SELECT device_id, uid, consumed_at, member_key FROM jobs WHERE job_id = ?1",
                 params![job_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?;
-        let Some((device_id, uid, consumed_at)) = row else {
+        let Some((device_id, uid, consumed_at, member_key)) = row else {
             return Ok(false);
         };
         if consumed_at.is_none() {
@@ -658,13 +859,21 @@ impl Store {
                 params![now, job_id],
             )?;
         }
-        tracing::info!(job_id, reason, "job failed");
+        tracing::info!(job_id, member_key = %member_key, reason, "job failed");
         let uid_opt = if uid.is_empty() {
             None
         } else {
             Some(uid.as_str())
         };
-        self.audit_event(now, Some(&device_id), uid_opt, None, "denied", "job_failed")?;
+        self.audit_event_with_member(
+            now,
+            Some(&device_id),
+            uid_opt,
+            None,
+            "denied",
+            "job_failed",
+            Some(&member_key),
+        )?;
         Ok(true)
     }
 
@@ -682,29 +891,43 @@ impl Store {
         // Replacement semantics (see enroll_tag): the member's other tags
         // become inert the moment this one is accepted. The unique partial
         // index makes a second active tag unrepresentable; revoke first.
+        let replaced_uids: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT uid FROM tags WHERE member_key = ?1 AND uid != ?2 AND status = 'active'",
+            )?;
+            let rows = stmt.query_map(params![member_key, uid], |r| r.get(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+
+        for r_uid in replaced_uids {
+            tx.execute(
+                "UPDATE tags SET status = 'revoked', entry_gen = entry_gen + 1 WHERE uid = ?1",
+                params![r_uid],
+            )?;
+            record_roster_event_for_tag_in_tx(&tx, &r_uid, timestamp)?;
+        }
+
         tx.execute(
-            "UPDATE tags SET status = 'revoked'
-             WHERE member_key = ?1 AND uid != ?2 AND status = 'active'",
-            params![member_key, uid],
-        )?;
-        tx.execute(
-            "INSERT INTO tags (uid, member_key, key_version, last_counter, status, enrolled_at)
-             VALUES (?1, ?2, ?3, ?4, 'active', ?5)
+            "INSERT INTO tags (uid, member_key, key_version, last_counter, status, enrolled_at, entry_gen)
+             VALUES (?1, ?2, ?3, ?4, 'active', ?5, 1)
              ON CONFLICT(uid) DO UPDATE SET
              member_key = excluded.member_key,
              key_version = excluded.key_version,
              last_counter = excluded.last_counter,
              status = 'active',
-             enrolled_at = excluded.enrolled_at",
+             enrolled_at = excluded.enrolled_at,
+             entry_gen = tags.entry_gen + 1",
             params![uid, member_key, key_version, last_counter, timestamp],
         )?;
+        record_roster_event_for_tag_in_tx(&tx, uid, timestamp)?;
+
         tx.commit()?;
         Ok(())
     }
 
     pub fn list_tags(&self) -> rusqlite::Result<Vec<TagInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT uid, member_key, status, key_version, last_counter, enrolled_at
+            "SELECT uid, member_key, status, key_version, last_counter, enrolled_at, entry_gen
              FROM tags ORDER BY enrolled_at, uid",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -715,6 +938,7 @@ impl Store {
                 key_version: r.get(3)?,
                 last_counter: r.get(4)?,
                 enrolled_at: r.get(5)?,
+                entry_gen: r.get(6)?,
             })
         })?;
         rows.collect()
@@ -785,7 +1009,7 @@ impl Store {
         decision: Option<&str>,
     ) -> rusqlite::Result<Vec<AuditInfo>> {
         let mut sql = String::from(
-            "SELECT id, ts, device_id, uid, counter, decision, reason
+            "SELECT id, ts, device_id, uid, counter, decision, reason, member_key
              FROM audit_log WHERE 1=1",
         );
         let mut binds: Vec<rusqlite::types::Value> = Vec::new();
@@ -810,6 +1034,7 @@ impl Store {
                 counter: r.get(4)?,
                 decision: r.get(5)?,
                 reason: r.get(6)?,
+                member_key: r.get(7)?,
             })
         })?;
         rows.collect()
@@ -945,7 +1170,7 @@ impl Store {
     pub fn get_active_tag_for_member(&self, member_key: &str) -> rusqlite::Result<Option<TagInfo>> {
         self.conn
             .query_row(
-                "SELECT uid, member_key, status, key_version, last_counter, enrolled_at
+                "SELECT uid, member_key, status, key_version, last_counter, enrolled_at, entry_gen
                  FROM tags WHERE member_key = ?1 AND status = 'active'",
                 params![member_key],
                 |r| {
@@ -956,6 +1181,7 @@ impl Store {
                         key_version: r.get(3)?,
                         last_counter: r.get(4)?,
                         enrolled_at: r.get(5)?,
+                        entry_gen: r.get(6)?,
                     })
                 },
             )
@@ -964,7 +1190,7 @@ impl Store {
 
     pub fn list_tags_for_member(&self, member_key: &str) -> rusqlite::Result<Vec<TagInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT uid, member_key, status, key_version, last_counter, enrolled_at
+            "SELECT uid, member_key, status, key_version, last_counter, enrolled_at, entry_gen
              FROM tags WHERE member_key = ?1 ORDER BY enrolled_at DESC, uid",
         )?;
         let rows = stmt.query_map(params![member_key], |r| {
@@ -975,6 +1201,7 @@ impl Store {
                 key_version: r.get(3)?,
                 last_counter: r.get(4)?,
                 enrolled_at: r.get(5)?,
+                entry_gen: r.get(6)?,
             })
         })?;
         rows.collect()
@@ -984,19 +1211,23 @@ impl Store {
         &mut self,
         member_key: &str,
     ) -> rusqlite::Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT uid FROM tags WHERE member_key = ?1 AND status = 'active'")?;
-        let uids: Vec<String> = stmt
-            .query_map(params![member_key], |r| r.get(0))?
-            .collect::<Result<_, _>>()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let tx = self.conn.transaction()?;
+        let uids: Vec<String> = {
+            let mut stmt =
+                tx.prepare("SELECT uid FROM tags WHERE member_key = ?1 AND status = 'active'")?;
+            let rows = stmt.query_map(params![member_key], |r| r.get(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
 
-        if !uids.is_empty() {
-            self.conn.execute(
-                "UPDATE tags SET status = 'revoked' WHERE member_key = ?1 AND status = 'active'",
-                params![member_key],
+        for uid in &uids {
+            tx.execute(
+                "UPDATE tags SET status = 'revoked', entry_gen = entry_gen + 1 WHERE uid = ?1",
+                params![uid],
             )?;
+            record_roster_event_for_tag_in_tx(&tx, uid, &now)?;
         }
+        tx.commit()?;
         Ok(uids)
     }
 
@@ -1035,6 +1266,7 @@ impl Store {
         &self,
         member_key: &str,
     ) -> rusqlite::Result<Option<MemberJobStatus>> {
+        #[allow(clippy::type_complexity)]
         let row: Option<(
             String,
             String,
@@ -1125,7 +1357,7 @@ impl Store {
         }
         let placeholders: Vec<String> = (1..=uids.len()).map(|i| format!("?{i}")).collect();
         let sql = format!(
-            "SELECT id, ts, device_id, uid, counter, decision, reason
+            "SELECT id, ts, device_id, uid, counter, decision, reason, member_key
              FROM audit_log
              WHERE uid IN ({})
              ORDER BY id DESC LIMIT ?{}",
@@ -1148,13 +1380,452 @@ impl Store {
                 counter: r.get(4)?,
                 decision: r.get(5)?,
                 reason: r.get(6)?,
+                member_key: r.get(7)?,
             })
         })?;
         rows.collect()
     }
 
+    pub fn list_anomalies(&self) -> rusqlite::Result<Vec<AnomalyRow>> {
+        self.list_anomalies_filtered(50, None, None)
+    }
+
+    pub fn tap_report_by_id(&self, tap_id: &str) -> rusqlite::Result<Option<TapReportRow>> {
+        self.conn
+            .query_row(
+                "SELECT tap_id, device_id, uid, counter, decision, reason, time_uncertain, dev_ts, recv_ts, key_version, kind
+                 FROM tap_reports WHERE tap_id = ?1",
+                params![tap_id],
+                |r| {
+                    Ok(TapReportRow {
+                        tap_id: r.get(0)?,
+                        device_id: r.get(1)?,
+                        uid: r.get(2)?,
+                        counter: r.get(3)?,
+                        decision: r.get(4)?,
+                        reason: r.get(5)?,
+                        time_uncertain: r.get(6)?,
+                        dev_ts: r.get(7)?,
+                        recv_ts: r.get(8)?,
+                        key_version: r.get(9)?,
+                        kind: r.get(10)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    pub fn record_anomaly(
+        &mut self,
+        ts: &str,
+        device_id: Option<&str>,
+        uid: Option<&str>,
+        kind: &str,
+        detail: Option<&str>,
+    ) -> rusqlite::Result<i64> {
+        self.conn.execute(
+            "INSERT INTO anomalies (ts, device_id, uid, kind, detail)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![ts, device_id, uid, kind, detail],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Ingest a tap report or tap consult idempotently (Task 3 / D2).
+    ///
+    /// Semantics:
+    /// - Duplicate `tap_id`: returns `IngestReportOutcome::Duplicate(existing)`, no new row created.
+    /// - Counter == 0xFFFFFF: flags terminal anomaly `saturation`.
+    /// - Counter regression: if tag exists and `report.counter < last_counter`, flags anomaly `counter_regression`.
+    /// - Max-only counter merge: `last_counter = max(last_counter, report.counter)` (no counter_replay check for reports).
+    /// - Inserts row into `tap_reports`.
+    pub fn ingest_tap_report(
+        &mut self,
+        report: &TapReportInput,
+    ) -> rusqlite::Result<IngestReportOutcome> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+        // 1. Check for duplicate tap_id
+        let existing: Option<TapReportRow> = tx
+            .query_row(
+                "SELECT tap_id, device_id, uid, counter, decision, reason, time_uncertain, dev_ts, recv_ts, key_version, kind
+                 FROM tap_reports WHERE tap_id = ?1",
+                params![report.tap_id],
+                |r| {
+                    Ok(TapReportRow {
+                        tap_id: r.get(0)?,
+                        device_id: r.get(1)?,
+                        uid: r.get(2)?,
+                        counter: r.get(3)?,
+                        decision: r.get(4)?,
+                        reason: r.get(5)?,
+                        time_uncertain: r.get(6)?,
+                        dev_ts: r.get(7)?,
+                        recv_ts: r.get(8)?,
+                        key_version: r.get(9)?,
+                        kind: r.get(10)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        if let Some(row) = existing {
+            return Ok(IngestReportOutcome::Duplicate(Box::new(row)));
+        }
+
+        // 2. Cross-door duplicate detection (MUST DO #5)
+        // If this (uid, counter) was already reported by a DIFFERENT device_id,
+        // record an anomaly of kind 'cross_door_duplicate'.
+        let prior_device: Option<String> = tx
+            .query_row(
+                "SELECT device_id FROM tap_reports WHERE uid = ?1 AND counter = ?2 AND device_id != ?3 LIMIT 1",
+                params![report.uid, report.counter, report.device_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        if let Some(other_dev) = prior_device {
+            tx.execute(
+                "INSERT INTO anomalies (ts, device_id, uid, kind, detail)
+                 VALUES (?1, ?2, ?3, 'cross_door_duplicate', ?4)",
+                params![
+                    report.recv_ts,
+                    report.device_id,
+                    report.uid,
+                    format!(
+                        "tap_id={}; counter={} previously reported by device_id={}",
+                        report.tap_id, report.counter, other_dev
+                    ),
+                ],
+            )?;
+        }
+
+        // 3. Check saturation: counter == 0xFFFFFF (16777215)
+        if report.counter == 0xFF_FFFF {
+            tx.execute(
+                "INSERT INTO anomalies (ts, device_id, uid, kind, detail)
+                 VALUES (?1, ?2, ?3, 'saturation', ?4)",
+                params![
+                    report.recv_ts,
+                    report.device_id,
+                    report.uid,
+                    format!("tap_id={}; counter=0xFFFFFF saturated", report.tap_id)
+                ],
+            )?;
+        }
+
+        // 4. Counter check against tags table (if tag exists and CMAC did not fail)
+        let is_cmac_fail = matches!(report.reason, Some("cmac_fail" | "bad_cmac"));
+        if !is_cmac_fail {
+            let tag_counter: Option<i64> = tx
+                .query_row(
+                    "SELECT last_counter FROM tags WHERE uid = ?1",
+                    params![report.uid],
+                    |r| r.get(0),
+                )
+                .optional()?;
+
+            if let Some(last) = tag_counter {
+                if report.counter < last {
+                    // Counter regression anomaly
+                    tx.execute(
+                        "INSERT INTO anomalies (ts, device_id, uid, kind, detail)
+                         VALUES (?1, ?2, ?3, 'counter_regression', ?4)",
+                        params![
+                            report.recv_ts,
+                            report.device_id,
+                            report.uid,
+                            format!(
+                                "tap_id={}; report_counter={} < last_counter={}",
+                                report.tap_id, report.counter, last
+                            )
+                        ],
+                    )?;
+                } else if report.counter > last {
+                    // Max-only counter merge
+                    tx.execute(
+                        "UPDATE tags SET last_counter = ?1 WHERE uid = ?2",
+                        params![report.counter, report.uid],
+                    )?;
+                }
+            }
+        }
+
+        // 5. Insert tap_reports row
+        tx.execute(
+            "INSERT INTO tap_reports (tap_id, device_id, uid, counter, decision, reason, time_uncertain, dev_ts, recv_ts, key_version, kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                report.tap_id,
+                report.device_id,
+                report.uid,
+                report.counter,
+                report.decision,
+                report.reason,
+                if report.time_uncertain { 1 } else { 0 },
+                report.dev_ts,
+                report.recv_ts,
+                report.key_version,
+                report.kind,
+            ],
+        )?;
+
+        tx.commit()?;
+        Ok(IngestReportOutcome::Ingested)
+    }
+
     pub fn conn_mut(&mut self) -> &mut Connection {
         &mut self.conn
+    }
+
+    // Task 6: Read-only query helpers for admin v2 surfaces (anomalies, tap reports)
+    pub fn list_anomalies_filtered(
+        &self,
+        limit: u32,
+        kind: Option<&str>,
+        device_id: Option<&str>,
+    ) -> rusqlite::Result<Vec<AnomalyRow>> {
+        let mut sql = String::from(
+            "SELECT id, ts, device_id, uid, kind, detail
+             FROM anomalies WHERE 1=1",
+        );
+        let mut binds: Vec<rusqlite::types::Value> = Vec::new();
+        if let Some(k) = kind {
+            binds.push(rusqlite::types::Value::Text(k.to_string()));
+            sql.push_str(&format!(" AND kind = ?{}", binds.len()));
+        }
+        if let Some(d) = device_id {
+            binds.push(rusqlite::types::Value::Text(d.to_string()));
+            sql.push_str(&format!(" AND device_id = ?{}", binds.len()));
+        }
+        binds.push(rusqlite::types::Value::Integer(i64::from(limit)));
+        sql.push_str(&format!(" ORDER BY id DESC LIMIT ?{}", binds.len()));
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(binds), |r| {
+            Ok(AnomalyRow {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                device_id: r.get(2)?,
+                uid: r.get(3)?,
+                kind: r.get(4)?,
+                detail: r.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn list_tap_reports(
+        &self,
+        limit: u32,
+        device_id: Option<&str>,
+        uid: Option<&str>,
+    ) -> rusqlite::Result<Vec<TapReportRow>> {
+        let mut sql = String::from(
+            "SELECT tap_id, device_id, uid, counter, decision, reason, time_uncertain, dev_ts, recv_ts, key_version, kind
+             FROM tap_reports WHERE 1=1",
+        );
+        let mut binds: Vec<rusqlite::types::Value> = Vec::new();
+        if let Some(d) = device_id {
+            binds.push(rusqlite::types::Value::Text(d.to_string()));
+            sql.push_str(&format!(" AND device_id = ?{}", binds.len()));
+        }
+        if let Some(u) = uid {
+            binds.push(rusqlite::types::Value::Text(u.to_string()));
+            sql.push_str(&format!(" AND uid = ?{}", binds.len()));
+        }
+        binds.push(rusqlite::types::Value::Integer(i64::from(limit)));
+        sql.push_str(&format!(
+            " ORDER BY recv_ts DESC, tap_id DESC LIMIT ?{}",
+            binds.len()
+        ));
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(binds), |r| {
+            let tu: i64 = r.get(6)?;
+            Ok(TapReportRow {
+                tap_id: r.get(0)?,
+                device_id: r.get(1)?,
+                uid: r.get(2)?,
+                counter: r.get(3)?,
+                decision: r.get(4)?,
+                reason: r.get(5)?,
+                time_uncertain: tu != 0,
+                dev_ts: r.get(7)?,
+                recv_ts: r.get(8)?,
+                key_version: r.get(9)?,
+                kind: r.get(10)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn build_full_snapshot(&self) -> rusqlite::Result<(u64, Vec<RosterEntry>)> {
+        let roster_gen: u64 = self
+            .conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM config WHERE key = 'roster_gen'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0)
+            .max(0) as u64;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut stmt = self.conn.prepare(
+            "SELECT t.uid, t.key_version, t.last_counter, t.status, t.entry_gen, m.active_until
+             FROM tags t
+             LEFT JOIN members m ON m.member_key = t.member_key
+             WHERE t.status = 'active'
+             ORDER BY t.uid",
+        )?;
+
+        let mut entries = Vec::new();
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, Option<String>>(5)?,
+            ))
+        })?;
+
+        for row in rows {
+            let (uid, key_version, last_counter, status, entry_gen, active_until) = row?;
+            let override_kind: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT kind FROM overrides
+                     WHERE (uid = ?1 OR member_key = (SELECT member_key FROM tags WHERE uid = ?1))
+                       AND (expires_at IS NULL OR expires_at > ?2)
+                     ORDER BY id DESC LIMIT 1",
+                    params![uid, now],
+                    |r| r.get(0),
+                )
+                .optional()?;
+
+            let mut flags = 0u8;
+            if status != "active" {
+                flags |= FLAG_REVOKED;
+            }
+            if let Some(kind) = override_kind {
+                if kind == "ban" {
+                    flags |= FLAG_OVERRIDDEN_BAN;
+                } else if kind == "allow" {
+                    flags |= FLAG_OVERRIDDEN_ALLOW;
+                }
+            }
+
+            let expiry_epoch = match active_until
+                .as_deref()
+                .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+            {
+                Some(dt) => dt.timestamp().max(0) as u32,
+                None => {
+                    flags |= FLAG_EXPIRY_ABSENT;
+                    0
+                }
+            };
+
+            entries.push(RosterEntry {
+                uid: parse_uid_7(&uid),
+                counter: last_counter as u32,
+                expiry_epoch,
+                key_version: key_version as u8,
+                entry_gen: entry_gen as u32,
+                flags,
+            });
+        }
+
+        Ok((roster_gen, entries))
+    }
+
+    pub fn build_delta_projection(
+        &self,
+        device_gen: u64,
+    ) -> rusqlite::Result<Option<(u64, Vec<RosterEntry>)>> {
+        let roster_gen: u64 = self
+            .conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM config WHERE key = 'roster_gen'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0)
+            .max(0) as u64;
+
+        if device_gen >= roster_gen {
+            return Ok(Some((roster_gen, Vec::new())));
+        }
+
+        let stats: (Option<i64>, i64) = self.conn.query_row(
+            "SELECT MIN(roster_gen), COUNT(*) FROM roster_events",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+
+        let (min_gen, count) = stats;
+        if count == 0 {
+            return Ok(None);
+        }
+
+        let min_gen = min_gen.unwrap_or(1).max(0) as u64;
+        if device_gen + 1 < min_gen {
+            // Evicted delta history fallback
+            return Ok(None);
+        }
+
+        let mut stmt = self.conn.prepare(
+            "SELECT roster_gen, uid, entry_blob
+             FROM roster_events
+             WHERE roster_gen > ?1
+             ORDER BY roster_gen ASC",
+        )?;
+
+        let mut entries_by_uid: std::collections::BTreeMap<String, RosterEntry> =
+            std::collections::BTreeMap::new();
+
+        let rows = stmt.query_map(params![device_gen as i64], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+
+        for row in rows {
+            let (_gen, uid, blob) = row?;
+            if let Ok(bytes) = hex::decode(&blob) {
+                if bytes.len() == ROSTER_ENTRY_SIZE {
+                    let mut b = [0u8; ROSTER_ENTRY_SIZE];
+                    b.copy_from_slice(&bytes);
+                    entries_by_uid.insert(uid, RosterEntry::decode(&b));
+                }
+            }
+        }
+
+        let entries: Vec<_> = entries_by_uid.into_values().collect();
+        Ok(Some((roster_gen, entries)))
+    }
+
+    pub fn prune_roster_events(&mut self) -> rusqlite::Result<usize> {
+        let deleted_old = self.conn.execute(
+            "DELETE FROM roster_events WHERE ts < datetime('now', '-30 days')",
+            [],
+        )?;
+        let deleted_excess = self.conn.execute(
+            "DELETE FROM roster_events WHERE rowid NOT IN (
+                SELECT rowid FROM roster_events ORDER BY roster_gen DESC, rowid DESC LIMIT 10000
+            )",
+            [],
+        )?;
+        Ok(deleted_old + deleted_excess)
     }
 }
 
@@ -1226,6 +1897,7 @@ pub struct TagInfo {
     pub key_version: i64,
     pub last_counter: i64,
     pub enrolled_at: String,
+    pub entry_gen: i64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1254,6 +1926,53 @@ pub struct AuditInfo {
     pub counter: Option<i64>,
     pub decision: String,
     pub reason: String,
+    pub member_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TapReportRow {
+    pub tap_id: String,
+    pub device_id: String,
+    pub uid: String,
+    pub counter: i64,
+    pub decision: Option<String>,
+    pub reason: Option<String>,
+    pub time_uncertain: bool,
+    pub dev_ts: Option<String>,
+    pub recv_ts: String,
+    pub key_version: Option<i64>,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TapReportInput<'a> {
+    pub tap_id: &'a str,
+    pub device_id: &'a str,
+    pub uid: &'a str,
+    pub counter: i64,
+    pub decision: Option<&'a str>,
+    pub reason: Option<&'a str>,
+    pub time_uncertain: bool,
+    pub dev_ts: Option<&'a str>,
+    pub recv_ts: &'a str,
+    pub key_version: Option<i64>,
+    pub kind: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IngestReportOutcome {
+    Ingested,
+    Duplicate(Box<TapReportRow>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AnomalyRow {
+    pub id: i64,
+    pub ts: String,
+    pub device_id: Option<String>,
+    pub uid: Option<String>,
+    pub kind: String,
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

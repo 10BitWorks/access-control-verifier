@@ -1,9 +1,6 @@
-#[path = "../src/store.rs"]
-pub mod store;
-
+use access_control_verifier::store::{self, AccessDecision, JobClaim, Store, TapOutcome};
 use std::sync::Arc;
 use std::thread;
-use store::{AccessDecision, JobClaim, Store, TapOutcome};
 use tempfile::tempdir;
 
 #[test]
@@ -360,14 +357,15 @@ fn test_fail_job_marks_consumed_and_audits() {
         .unwrap());
 
     let conn = rusqlite::Connection::open(&db_path).unwrap();
-    let audits: i64 = conn
+    let audits: (i64, Option<String>) = conn
         .query_row(
-            "SELECT COUNT(*) FROM audit_log WHERE reason = 'job_failed' AND decision = 'denied'",
+            "SELECT COUNT(*), member_key FROM audit_log WHERE reason = 'job_failed' AND decision = 'denied'",
             [],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
-    assert_eq!(audits, 1);
+    assert_eq!(audits.0, 1);
+    assert_eq!(audits.1.as_deref(), Some("m1"));
 }
 
 #[test]
@@ -395,4 +393,413 @@ fn test_set_device_role() {
         Some("both")
     );
     assert!(!store.set_device_role("ghost", "writer").unwrap());
+}
+
+#[test]
+fn test_additive_schema_and_entry_gen_backfill() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("preexisting.db");
+
+    // Simulate an older DB created before tags.entry_gen and audit_log.member_key existed
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tags (
+                uid TEXT PRIMARY KEY,
+                member_key TEXT NOT NULL,
+                key_version INTEGER NOT NULL DEFAULT 1,
+                last_counter INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active',
+                note TEXT,
+                enrolled_at TEXT NOT NULL
+            );
+            CREATE TABLE audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                device_id TEXT,
+                uid TEXT,
+                counter INTEGER,
+                decision TEXT NOT NULL,
+                reason TEXT NOT NULL
+            );
+            INSERT INTO tags (uid, member_key, enrolled_at) VALUES ('pre_uid_1', 'member_old', '2026-01-01T00:00:00Z');
+            INSERT INTO audit_log (ts, device_id, uid, decision, reason) VALUES ('2026-01-01T00:00:00Z', 'dev1', 'pre_uid_1', 'granted', 'ok');",
+        ).unwrap();
+    }
+
+    // Now open Store on that preexisting db, which runs apply_schema
+    let store = Store::open(&db_path).unwrap();
+
+    // Verify config default roster_gen = 0
+    assert_eq!(
+        store.get_config("roster_gen").unwrap().as_deref(),
+        Some("0")
+    );
+
+    // Verify existing tag row received default entry_gen = 1
+    let tag = store.tag_by_uid("pre_uid_1").unwrap().expect("tag found");
+    assert_eq!(tag.entry_gen, 1);
+
+    // Verify audit_log row has null member_key and can be read by list_audit
+    let audits = store.list_audit(10, None, None).unwrap();
+    assert_eq!(audits.len(), 1);
+    assert_eq!(audits[0].member_key, None);
+}
+
+#[test]
+fn test_ingest_tap_report_idempotency_and_anomalies() {
+    use store::{IngestReportOutcome, TapReportInput};
+
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let mut store = Store::open(&db_path).unwrap();
+
+    // Enroll a tag with counter 100
+    store
+        .enroll_job_tag("04010203040506", "member_1", 1, 100, "2026-10-28T12:00:00Z")
+        .unwrap();
+
+    // 1. Valid forward tap report
+    let rep1 = TapReportInput {
+        tap_id: "door1:1",
+        device_id: "door1",
+        uid: "04010203040506",
+        counter: 105,
+        decision: Some("granted"),
+        reason: Some("granted"),
+        time_uncertain: false,
+        dev_ts: Some("2026-10-28T12:05:00Z"),
+        recv_ts: "2026-10-28T12:05:01Z",
+        key_version: Some(1),
+        kind: "report",
+    };
+    let outcome1 = store.ingest_tap_report(&rep1).unwrap();
+    assert_eq!(outcome1, IngestReportOutcome::Ingested);
+
+    // Counter merged to 105
+    let tag = store.tag_by_uid("04010203040506").unwrap().unwrap();
+    assert_eq!(tag.last_counter, 105);
+
+    // 2. Duplicate tap_id (door1:1) returns Duplicate and DOES NOT mutate
+    let outcome2 = store.ingest_tap_report(&rep1).unwrap();
+    match outcome2 {
+        IngestReportOutcome::Duplicate(row) => {
+            assert_eq!(row.tap_id, "door1:1");
+            assert_eq!(row.counter, 105);
+            assert_eq!(row.kind, "report");
+        }
+        _ => panic!("expected duplicate tap outcome"),
+    }
+
+    // 3. Counter regression (e.g., door1:2 reports counter 102 < 105)
+    let rep_regress = TapReportInput {
+        tap_id: "door1:2",
+        device_id: "door1",
+        uid: "04010203040506",
+        counter: 102,
+        decision: Some("granted"),
+        reason: Some("granted"),
+        time_uncertain: false,
+        dev_ts: Some("2026-10-28T12:06:00Z"),
+        recv_ts: "2026-10-28T12:06:01Z",
+        key_version: Some(1),
+        kind: "report",
+    };
+    let outcome_regress = store.ingest_tap_report(&rep_regress).unwrap();
+    assert_eq!(outcome_regress, IngestReportOutcome::Ingested);
+
+    // Counter did NOT regress on the tag
+    let tag = store.tag_by_uid("04010203040506").unwrap().unwrap();
+    assert_eq!(tag.last_counter, 105);
+
+    // Check anomaly logged for counter_regression
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let anomaly_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM anomalies WHERE kind = 'counter_regression' AND uid = '04010203040506'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(anomaly_count, 1);
+
+    // 4. Counter saturation (counter == 0xFFFFFF = 16777215)
+    let rep_sat = TapReportInput {
+        tap_id: "door1:3",
+        device_id: "door1",
+        uid: "04010203040506",
+        counter: 0xFF_FFFF,
+        decision: Some("denied"),
+        reason: Some("counter_saturated"),
+        time_uncertain: false,
+        dev_ts: Some("2026-10-28T12:07:00Z"),
+        recv_ts: "2026-10-28T12:07:01Z",
+        key_version: Some(1),
+        kind: "report",
+    };
+    let outcome_sat = store.ingest_tap_report(&rep_sat).unwrap();
+    assert_eq!(outcome_sat, IngestReportOutcome::Ingested);
+
+    let sat_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM anomalies WHERE kind = 'saturation' AND uid = '04010203040506'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(sat_count, 1);
+}
+
+#[test]
+fn test_policy_changes_bump_entry_gen_and_roster_events() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("bump_test.db");
+    let mut store = Store::open(&db_path).unwrap();
+
+    // 1. Initial roster_gen is 0
+    assert_eq!(
+        store.get_config("roster_gen").unwrap().as_deref(),
+        Some("0")
+    );
+
+    store
+        .conn_mut()
+        .execute(
+            "INSERT INTO members (member_key, display_name, active_until)
+             VALUES ('m1', 'Member One', '2027-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+    // 2. Enroll first tag => entry_gen = 1, roster_gen = 1, 1 roster_event
+    let ts1 = "2026-10-28T10:00:00Z";
+    store.enroll_tag("04112233445566", "m1", 1, ts1).unwrap();
+
+    let tag1 = store.tag_by_uid("04112233445566").unwrap().unwrap();
+    assert_eq!(tag1.entry_gen, 1);
+    assert_eq!(tag1.status, "active");
+    assert_eq!(
+        store.get_config("roster_gen").unwrap().as_deref(),
+        Some("1")
+    );
+
+    // Check roster_events has 1 row with roster_gen = 1
+    let (ev_count, ev_blob): (i64, String) = store
+        .conn_mut()
+        .query_row(
+            "SELECT COUNT(*), entry_blob FROM roster_events WHERE uid = '04112233445566'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(ev_count, 1);
+    let bytes = hex::decode(&ev_blob).unwrap();
+    let entry =
+        access_control_verifier::sync_projection::RosterEntry::decode(&bytes.try_into().unwrap());
+    assert_eq!(entry.entry_gen, 1);
+    assert_eq!(entry.flags, 0); // active, valid expiry => flags 0
+
+    // 3. Enroll second tag for same member => replaces tag1 (revokes tag1)
+    // tag1 gets status='revoked', entry_gen bumped to 2, roster_gen becomes 2.
+    // tag2 is enrolled, entry_gen = 1, roster_gen becomes 3.
+    let ts2 = "2026-10-28T10:05:00Z";
+    store.enroll_tag("04aabbccddeeff", "m1", 1, ts2).unwrap();
+
+    let tag1_after = store.tag_by_uid("04112233445566").unwrap().unwrap();
+    assert_eq!(tag1_after.status, "revoked");
+    assert_eq!(tag1_after.entry_gen, 2);
+
+    let tag2 = store.tag_by_uid("04aabbccddeeff").unwrap().unwrap();
+    assert_eq!(tag2.status, "active");
+    assert_eq!(tag2.entry_gen, 1);
+
+    assert_eq!(
+        store.get_config("roster_gen").unwrap().as_deref(),
+        Some("3")
+    );
+
+    // Total roster events is now 3
+    let total_ev: i64 = store
+        .conn_mut()
+        .query_row("SELECT COUNT(*) FROM roster_events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(total_ev, 3);
+
+    // 4. Revoke tag2 => status='revoked', entry_gen bumped to 2, roster_gen becomes 4
+    store.revoke_tag("04aabbccddeeff").unwrap();
+    let tag2_after = store.tag_by_uid("04aabbccddeeff").unwrap().unwrap();
+    assert_eq!(tag2_after.status, "revoked");
+    assert_eq!(tag2_after.entry_gen, 2);
+    assert_eq!(
+        store.get_config("roster_gen").unwrap().as_deref(),
+        Some("4")
+    );
+
+    // 5. Revoking again does NOT bump (idempotent, no policy change)
+    store.revoke_tag("04aabbccddeeff").unwrap();
+    let tag2_same = store.tag_by_uid("04aabbccddeeff").unwrap().unwrap();
+    assert_eq!(tag2_same.entry_gen, 2);
+    assert_eq!(
+        store.get_config("roster_gen").unwrap().as_deref(),
+        Some("4")
+    );
+}
+
+#[test]
+fn test_counter_only_changes_never_bump_generations() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("counter_no_bump.db");
+    let mut store = Store::open(&db_path).unwrap();
+
+    store
+        .conn_mut()
+        .execute(
+            "INSERT INTO members (member_key, display_name, active_until)
+             VALUES ('m1', 'Member One', '2027-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+    let ts = "2026-10-28T10:00:00Z";
+    store.enroll_tag("04010203040506", "m1", 1, ts).unwrap();
+
+    let gen_before = store.get_config("roster_gen").unwrap().unwrap();
+    let tag_before = store.tag_by_uid("04010203040506").unwrap().unwrap();
+    assert_eq!(tag_before.entry_gen, 1);
+    assert_eq!(tag_before.last_counter, 0);
+
+    let ev_count_before: i64 = store
+        .conn_mut()
+        .query_row("SELECT COUNT(*) FROM roster_events", [], |r| r.get(0))
+        .unwrap();
+
+    // 1. Advance counter via record_tap
+    let outcome = store
+        .record_tap(
+            "04010203040506",
+            50,
+            Some("door1"),
+            "2026-10-28T10:01:00Z",
+            AccessDecision::Granted,
+        )
+        .unwrap();
+    assert_eq!(outcome, TapOutcome::Granted);
+
+    let tag_after_tap = store.tag_by_uid("04010203040506").unwrap().unwrap();
+    assert_eq!(tag_after_tap.last_counter, 50);
+    assert_eq!(tag_after_tap.entry_gen, 1, "entry_gen must NOT bump on tap");
+
+    let gen_after_tap = store.get_config("roster_gen").unwrap().unwrap();
+    assert_eq!(gen_before, gen_after_tap, "roster_gen must NOT bump on tap");
+
+    let ev_count_after_tap: i64 = store
+        .conn_mut()
+        .query_row("SELECT COUNT(*) FROM roster_events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        ev_count_before, ev_count_after_tap,
+        "roster_events count must NOT increase on tap"
+    );
+
+    // 2. Advance counter via ingest_tap_report
+    use store::TapReportInput;
+    let rep = TapReportInput {
+        tap_id: "door1:100",
+        device_id: "door1",
+        uid: "04010203040506",
+        counter: 60,
+        decision: Some("granted"),
+        reason: Some("granted"),
+        time_uncertain: false,
+        dev_ts: None,
+        recv_ts: "2026-10-28T10:02:00Z",
+        key_version: Some(1),
+        kind: "report",
+    };
+    store.ingest_tap_report(&rep).unwrap();
+
+    let tag_after_report = store.tag_by_uid("04010203040506").unwrap().unwrap();
+    assert_eq!(tag_after_report.last_counter, 60);
+    assert_eq!(
+        tag_after_report.entry_gen, 1,
+        "entry_gen must NOT bump on report counter advance"
+    );
+
+    let gen_after_report = store.get_config("roster_gen").unwrap().unwrap();
+    assert_eq!(
+        gen_before, gen_after_report,
+        "roster_gen must NOT bump on report counter advance"
+    );
+
+    let ev_count_after_report: i64 = store
+        .conn_mut()
+        .query_row("SELECT COUNT(*) FROM roster_events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        ev_count_before, ev_count_after_report,
+        "roster_events count must NOT increase on report counter advance"
+    );
+}
+
+#[test]
+fn test_projections_and_prune() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("proj_test.db");
+    let mut store = Store::open(&db_path).unwrap();
+
+    store
+        .conn_mut()
+        .execute(
+            "INSERT INTO members (member_key, display_name, active_until)
+             VALUES ('m1', 'Member One', '2027-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+    let ts = "2026-10-28T10:00:00Z";
+    store.enroll_tag("04010203040506", "m1", 1, ts).unwrap();
+
+    // Full snapshot
+    let (gen, full_entries) = store.build_full_snapshot().unwrap();
+    assert_eq!(gen, 1);
+    assert_eq!(full_entries.len(), 1);
+    assert_eq!(
+        full_entries[0].uid,
+        [0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06]
+    );
+    assert_eq!(full_entries[0].entry_gen, 1);
+
+    // Delta since gen 0
+    let delta = store.build_delta_projection(0).unwrap();
+    assert!(delta.is_some());
+    let (d_gen, d_entries) = delta.unwrap();
+    assert_eq!(d_gen, 1);
+    assert_eq!(d_entries.len(), 1);
+
+    // Delta since gen 1 (up to date)
+    let delta_up_to_date = store.build_delta_projection(1).unwrap();
+    assert_eq!(delta_up_to_date, Some((1, Vec::new())));
+
+    // Evicted fallback test: manually simulate evicted roster_events
+    store
+        .conn_mut()
+        .execute("DELETE FROM roster_events", [])
+        .unwrap();
+    let delta_evicted = store.build_delta_projection(0).unwrap();
+    assert_eq!(
+        delta_evicted, None,
+        "empty events forces full snapshot fallback"
+    );
+
+    // Prune test: insert an event with old timestamp (>30 days ago)
+    store
+        .conn_mut()
+        .execute(
+            "INSERT INTO roster_events (roster_gen, uid, entry_blob, ts)
+             VALUES (1, '04010203040506', '00', datetime('now', '-35 days'))",
+            [],
+        )
+        .unwrap();
+    let pruned = store.prune_roster_events().unwrap();
+    assert_eq!(pruned, 1);
 }

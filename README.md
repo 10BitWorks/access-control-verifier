@@ -24,7 +24,13 @@ flowchart TD
 
 *   **Anti-clone:** SUN CMAC over dynamic counter and card UID. Every tap generates a unique cryptographic signature.
 *   **Anti-replay:** Strictly monotonic tap counter. The verifier rejects counters lower than or equal to the last seen counter for a given UID.
-*   **Accepted Risk:** Door readers store diversified keys locally for offline fail-safe operation. If a reader is physically extracted and disassembled, only that reader's sub-keys are exposed, not the master key.
+*   **Accepted Risks:**
+    1. Master key at rest plaintext in the keygate partition (no eFuse) — mounted-reader threat model.
+    2. Master transits plaintext MQTT :1883 during the commissioning window — LAN attacker with broker read access can capture it; ACLs narrow the window.
+    3. `time_uncertain` taps grant on cached policy after reboot without verifier time — fail-open per user decision.
+    4. Stale-access window while offline bounded by offline duration; revocation granularity is "the right day" — cross-door replay flagged on flush, not prevented.
+    5. Outbox/ring overflow drops OLDEST records (door never stops; bounded audit loss, gap-flagged).
+    6. If EMQX authn stays disabled: any LAN client can impersonate any device clientid (S2 recommendation records the user's call).
 
 ## Quickstart
 

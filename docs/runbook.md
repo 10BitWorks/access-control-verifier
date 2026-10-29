@@ -390,3 +390,117 @@ The service is fully containerized. Moving to a new location requires:
 1.  Deploying the `compose.yaml` stack.
 2.  Updating the MQTT broker DNS/IP in the environment.
 3.  Re-establishing Tailscale/LAN connectivity.
+
+## v2 Offline-First Reader Operations (0.5.0+)
+
+> **MONITOR PAUSE REMINDER**: Before performing any gateway or reader restarts,
+> firmware OTA updates, or broker ACL updates, pause the relevant monitors at
+> `https://uptime.10bitworks.com/metrics` (using API Key `uk1_pfrCn5jYgx6KryDGOqFWmIcEaKFGDhzZC6XdAZKM`,
+> HTTP Basic Auth with empty username) to prevent false alerts.
+
+### 1. Reader Commissioning Procedure (D3)
+
+Offline verification requires the door reader to hold the active master key in
+its dedicated flash partition (`keygate`). In v2, key material never crosses
+MQTT during routine taps.
+
+1. **Gate eligibility**:
+   Ensure the reader exists in `devices` with `offline_verify = 1`. In the admin UI
+   (`/admin`) or via API:
+   ```bash
+   curl -X POST -H "Authorization: Bearer $ADMIN_BEARER_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"device_id":"keygate-frontdoor","role":"both","offline_verify":true}' \
+     http://localhost:8000/admin/api/devices
+   ```
+2. **Initial Hello & Commissioning trigger**:
+   When the uncommissioned reader boots, it publishes `keygate/v2/{id}/hello` with
+   an empty `key_versions` array.
+3. **Verifier Commissioning Dispatch**:
+   The verifier automatically publishes the active master key version to
+   `keygate/v2/{id}/commission`:
+   ```json
+   {"key_version": 1, "master_hex": "..."}
+   ```
+   *Note: This topic is ACL-locked to the verifier principal and target device clientid,
+   and is published non-retained.*
+4. **Verification**:
+   The reader persists the key in flash and echoes `key_versions: [1]` in its next hello.
+   Check `/admin` Devices table or verifier logs to confirm handshake completion.
+
+### 2. Fleet Master Key Rotation Window (D3)
+
+Master key rotation invalidates every physical card's diversified key and requires
+a coordinated maintenance window.
+
+1. **Pause monitors**:
+   Pause door reader and access verifier monitors in Uptime Kuma.
+2. **Stage dual-master support**:
+   Devices support caching two master keys `{current, previous}`:
+   - Configure the new master key `vN+1` on the verifier.
+   - The verifier distributes `vN+1` via `keygate/v2/{id}/commission` to all
+     `offline_verify = 1` readers.
+   - **Gate**: Require a hello echo acknowledging `vN+1` from every reader before proceeding.
+3. **Re-provision cards**:
+   Re-enroll member cards at `vN+1` using the card writer and admin portal. Readers
+   verify CMAC against the tag's key_version, falling back to previous version if needed.
+4. **Retire previous master**:
+   Once all tags are re-enrolled, decommission `vN` in the verifier.
+5. **Resume monitors**:
+   Unpause Uptime Kuma monitors and verify normal tap entries in the Audit Log and Tap Reports.
+
+### 3. Retained-ACL Purge Procedure (S6)
+
+Legacy verifier versions published retained ACL payloads to `access/{id}/acl`. In v2,
+per-tag key material is never broadcast. Stale retained ACLs must be purged from the broker.
+
+```bash
+# Publish empty retained messages with QoS 1 to clear broker state
+mosquitto_pub -h $MQTT_HOST -p $MQTT_PORT -u $MQTT_USERNAME -P $MQTT_PASSWORD \
+  -t "access/keygate1/acl" -r -n -q 1
+
+mosquitto_pub -h $MQTT_HOST -p $MQTT_PORT -u $MQTT_USERNAME -P $MQTT_PASSWORD \
+  -t "access/keygate-frontdoor/acl" -r -n -q 1
+
+# Purge legacy presence retained topic if cleaning up retired reader
+mosquitto_pub -h $MQTT_HOST -p $MQTT_PORT -u $MQTT_USERNAME -P $MQTT_PASSWORD \
+  -t "access/keygate1/presence" -r -n -q 1
+```
+
+Verify via subscriber that retained messages are gone:
+```bash
+mosquitto_sub -h $MQTT_HOST -p $MQTT_PORT -u $MQTT_USERNAME -P $MQTT_PASSWORD \
+  -t "access/+/acl" --retained-only -W 3
+```
+
+### 4. Device Rename Procedure (e.g. `keygate1` → `keygate-frontdoor`) (D9)
+
+Renaming a physical door reader must follow strict sequencing to avoid locking the door
+or causing an identity split:
+
+1. **Pause monitors**:
+   Pause door uptime checks (`keygate1` / `keygate-frontdoor`) on Uptime Kuma.
+2. **Pre-populate Devices table BEFORE firmware update**:
+   The verifier role gate requires the device to be registered before authorization:
+   ```bash
+   curl -X POST -H "Authorization: Bearer $ADMIN_BEARER_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"device_id":"keygate-frontdoor","role":"both","offline_verify":false}' \
+     http://localhost:8000/admin/api/devices
+   ```
+3. **Configure EMQX credentials & ACLs**:
+   Provision broker credentials and topic permissions for the new `clientid`:
+   ```bash
+   cargo run --bin emqx-device -- --device-id keygate-frontdoor --apply
+   ```
+4. **Build & Deploy Firmware**:
+   Build firmware with `DEVICE_ID=keygate-frontdoor`. Use `ota-push.py --prod` to deploy
+   to the production reader under probation.
+5. **Verify Presence & Taps**:
+   Observe hello and presence on `keygate/v2/keygate-frontdoor/hello` and `access/keygate-frontdoor/presence`.
+   Perform a physical test tap and verify audit row in `/admin`.
+6. **Purge legacy retained state**:
+   Execute the Retained-ACL Purge procedure for the old `keygate1` topic tree.
+7. **Resume monitors & update configs**:
+   Update monitor labels in Uptime Kuma, wiki network tables, and unpause monitors. Keep
+   the legacy `keygate1` row in `devices` for historical audit integrity.

@@ -537,7 +537,7 @@ to the previous known-good firmware slot without manual intervention.
   ```
 - **Observations & Evidence**:
   - `scripts/ota-push.py` output streams chunks (512 bytes each, default 20 ms pace) and publishes `end`.
-  - In `access/keygate-frontdoor/log` or EMQX trace (`/var/log/emqx/trace_keygate1.log` on `10.7.1.106`):
+  - In `access/keygate-frontdoor/log` or EMQX trace (`/var/log/emqx/trace_keygate-frontdoor.log` on `10.7.1.106` — note: the EMQX clientid trace must be re-created for the new identity after executing Section 4 Device Rename):
     - Device logs: `ota: erase complete`, `ota: write complete`, `ota: rebooting into new slot`.
     - Boot banner appears within 90s: `BOOT BANNER: ... fw git:<sha>`.
     - Confirmation marker written to flash: `ota: probation confirmed`.
@@ -621,14 +621,10 @@ ssh root@10.7.1.106 "iptables -I INPUT -p tcp --dport 1883 -s 10.7.1.0/24 -j DRO
    ssh root@10.7.1.106 "iptables -D INPUT -p tcp --dport 1883 -s 10.7.1.0/24 -j DROP"
    ```
 2. **Verify WAL/Outbox Drain in Verifier SQLite Database**:
-   Run the exact query against the live verifier container volume to inspect buffered reports:
+   The verifier container image does not ship the `sqlite3` binary; inspect the live database
+   volume (`access-control-verifier_verifier-data`) using a throwaway Alpine sidecar:
    ```bash
-   ssh link-docker "docker exec -i access-control-verifier sqlite3 /data/access.db \"
-     SELECT tap_id, device_id, uid, counter, decision, reason, time_uncertain, dev_ts, recv_ts, kind
-     FROM tap_reports
-     ORDER BY recv_ts DESC
-     LIMIT 5;
-   \""
+   ssh link-docker "docker run --rm -v access-control-verifier_verifier-data:/data alpine sh -c 'apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/access.db \"SELECT tap_id, device_id, uid, counter, decision, reason, time_uncertain, dev_ts, recv_ts, kind FROM tap_reports ORDER BY recv_ts DESC LIMIT 5;\"'"
    ```
    **Expected Database Output**:
    - `tap_id` appears in the format `keygate-frontdoor:<seq>`.
@@ -662,30 +658,14 @@ logs divergences, but actuates the physical relay using the legacy `cmd` path.
 - **Duration**: Minimum 7 continuous days (168 hours) in production.
 - **Pass Criteria**:
   1. **Zero Unexplained Divergences**: Compare legacy `audit_log` decisions with v2 `tap_reports`
-     across the entire soak window using this exact query:
+     across the entire soak window using this throwaway sidecar query:
      ```bash
-     ssh link-docker "docker exec -i access-control-verifier sqlite3 /data/access.db \"
-       SELECT
-         a.ts AS legacy_ts,
-         r.recv_ts AS v2_ts,
-         a.uid,
-         a.decision AS legacy_decision,
-         r.decision AS v2_decision,
-         a.reason AS legacy_reason,
-         r.reason AS v2_reason
-       FROM audit_log a
-       JOIN tap_reports r ON a.uid = r.uid
-         AND ABS(strftime('%s', a.ts) - strftime('%s', r.recv_ts)) < 5
-       WHERE a.device_id = 'keygate-frontdoor'
-         AND a.decision != r.decision;
-     \""
+     ssh link-docker "docker run --rm -v access-control-verifier_verifier-data:/data alpine sh -c 'apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/access.db \"SELECT a.ts AS legacy_ts, r.recv_ts AS v2_ts, a.uid, a.decision AS legacy_decision, r.decision AS v2_decision, a.reason AS legacy_reason, r.reason AS v2_reason FROM audit_log a JOIN tap_reports r ON a.uid = r.uid AND ABS(strftime(\\\"%s\\\", a.ts) - strftime(\\\"%s\\\", r.recv_ts)) < 5 WHERE a.device_id = \\\"keygate-frontdoor\\\" AND a.decision != r.decision;\"'"
      ```
      *Requirement*: Output must return 0 rows. Any divergence requires investigation before S5.
   2. **Zero Anomalies**:
      ```bash
-     ssh link-docker "docker exec -i access-control-verifier sqlite3 /data/access.db \"
-       SELECT * FROM anomalies WHERE device_id = 'keygate-frontdoor';
-     \""
+     ssh link-docker "docker run --rm -v access-control-verifier_verifier-data:/data alpine sh -c 'apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/access.db \"SELECT * FROM anomalies WHERE device_id = \\\"keygate-frontdoor\\\";\"'"
      ```
      *Requirement*: Zero `counter_regression`, `seq_gap`, or `divergence` rows.
   3. **Zero Unexplained Resets**:
@@ -728,9 +708,7 @@ for the legacy `access/{id}/cmd` pulse message.
    - **Latency check**: Observe relay actuation. Decision latency is ≤300 ms (identical or faster than legacy).
    - **Audit verification**: Verify consult still occurs and row lands in `tap_reports`:
      ```bash
-     ssh link-docker "docker exec -i access-control-verifier sqlite3 /data/access.db \"
-       SELECT tap_id, uid, decision, reason, recv_ts FROM tap_reports ORDER BY recv_ts DESC LIMIT 1;
-     \""
+     ssh link-docker "docker run --rm -v access-control-verifier_verifier-data:/data alpine sh -c 'apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/access.db \"SELECT tap_id, uid, decision, reason, recv_ts FROM tap_reports ORDER BY recv_ts DESC LIMIT 1;\"'"
      ```
    - Verify reader log shows authoritative local actuation:
      `blog: local actuation granted uid=<hex>`.
@@ -766,9 +744,13 @@ v1 endpoints and configuration in the following strict order:
   - Disable and remove the rule once reader firmware no longer publishes to `access/{id}/auth`.
   - *Note*: Verifier v2 communicates directly over rumqttc subscriptions; no HTTP rule is required.
 - [ ] **4. Decommission Stale Broker Credentials**:
-  Using `emqx-device`, remove legacy client identities that are no longer in service:
+  Remove legacy device credentials via the EMQX v5 REST API (deletion is not yet implemented in `emqx-device`):
   ```bash
-  cargo run --bin emqx-device -- --device-id keygate1 --delete
+  # Remove legacy device credentials and user authorization rules directly via EMQX REST API
+  curl -s -X DELETE -u "$EMQX_API_KEY:$EMQX_API_SECRET" \
+    "http://10.7.1.106:18083/api/v5/authentication/password_based%3Abuilt_in_database/users/keygate1"
+  curl -s -X DELETE -u "$EMQX_API_KEY:$EMQX_API_SECRET" \
+    "http://10.7.1.106:18083/api/v5/authorization/sources/built_in_database/rules/users/keygate1"
   ```
 - [ ] **5. Update Uptime Monitor Labels & Wiki Inventory**:
   - Confirm all monitor checks point to `keygate-frontdoor`.

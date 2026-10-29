@@ -465,3 +465,979 @@ fn mqtt_config_defaults_to_tls_883_when_tls_enabled() {
     assert_eq!(port, 8883);
     assert_eq!(host, "mqtt.local");
 }
+
+fn compute_test_cmac(master: &Key, uid_hex: &str, counter: u32) -> String {
+    let uid = Uid::from_hex(uid_hex).expect("uid hex");
+    let tap_counter = access_control_verifier::crypto::TapCounter::from_u32(counter);
+    let cmac = access_control_verifier::crypto::cmac_for(master, &uid, &tap_counter);
+    hex::encode(cmac.0)
+}
+
+async fn wait_for_suback(eventloop: &mut EventLoop) {
+    for _ in 0..50 {
+        match tokio::time::timeout(Duration::from_millis(100), eventloop.poll()).await {
+            Ok(Ok(Event::Incoming(Incoming::SubAck(_)))) => return,
+            Ok(Ok(_)) => continue,
+            _ => continue,
+        }
+    }
+    panic!("timed out waiting for SubAck");
+}
+
+async fn publish_tap_until_ack(
+    client: &AsyncClient,
+    eventloop: &mut EventLoop,
+    tap_topic: &str,
+    tap_payload: &Value,
+    timeout: Duration,
+) -> (String, Value) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let payload_str = tap_payload.to_string();
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            panic!("timed out waiting for ack on {tap_topic}");
+        }
+        let _ = client
+            .publish(tap_topic, QoS::AtLeastOnce, false, payload_str.clone())
+            .await;
+        let poll_deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+        while tokio::time::Instant::now() < poll_deadline {
+            let rem = poll_deadline.saturating_duration_since(tokio::time::Instant::now());
+            if let Ok(Ok(Event::Incoming(Incoming::Publish(publish)))) =
+                tokio::time::timeout(rem, eventloop.poll()).await
+            {
+                let v: Value = serde_json::from_slice(&publish.payload).expect("payload is JSON");
+                return (publish.topic, v);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn v2_tap_consult_round_trip_asserts_ack_field_by_field() {
+    let broker = start_broker();
+    let (store, _db) = build_store("door1", 1);
+    let master = Key::from_hex(MASTER_HEX).expect("master key");
+
+    let spawned = spawn(
+        &MqttConfig {
+            host: "127.0.0.1".to_string(),
+            port: broker.port,
+            tls: false,
+            username: None,
+            password: None,
+            client_id: "verifier-v2-consult".to_string(),
+        },
+        Arc::clone(&store),
+        master.clone(),
+    );
+
+    let (client, mut eventloop) = AsyncClient::new(client_options(broker.port, "door1-dev"), 8);
+    client
+        .subscribe("keygate/v2/door1/ack", QoS::AtLeastOnce)
+        .await
+        .expect("subscribe ack");
+    wait_for_suback(&mut eventloop).await;
+
+    let cmac_hex = compute_test_cmac(&master, UID_ACTIVE, 10);
+    let tap_payload = json!({
+        "tap_id": "door1:1",
+        "uid": UID_ACTIVE,
+        "counter": 10,
+        "cmac": cmac_hex,
+        "decision": null,
+        "reason": null,
+        "key_version": 1,
+    });
+
+    let (topic, ack) = publish_tap_until_ack(
+        &client,
+        &mut eventloop,
+        "keygate/v2/door1/tap",
+        &tap_payload,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(topic, "keygate/v2/door1/ack");
+
+    // Assert field-by-field shape
+    assert_eq!(ack["tap_id"], "door1:1");
+    assert_eq!(ack["counter_floor"], 10);
+    assert!(ack["time_s"].as_u64().unwrap() > 0);
+
+    let entry = &ack["entry"];
+    assert!(entry.is_object(), "entry must be present for known tag");
+    assert_eq!(entry["uid"], UID_ACTIVE);
+    assert_eq!(entry["status"], "active");
+    assert!(entry["active_until"].is_string());
+    assert_eq!(entry["key_version"], 1);
+    assert_eq!(entry["entry_gen"], 1);
+    assert_eq!(entry["global_counter"], 10);
+
+    // Verify database row
+    let s = store.lock().unwrap();
+    let rep = s
+        .tap_report_by_id("door1:1")
+        .unwrap()
+        .expect("report saved");
+    assert_eq!(rep.decision.as_deref(), Some("granted"));
+    assert_eq!(rep.reason.as_deref(), Some("granted"));
+    assert_eq!(rep.kind, "consult");
+
+    spawned.presence_task.abort();
+    spawned.acl_task.abort();
+}
+
+#[tokio::test]
+async fn v2_tap_unknown_tag_ack_entry_is_null() {
+    let broker = start_broker();
+    let (store, _db) = build_store("door1", 1);
+    let master = Key::from_hex(MASTER_HEX).expect("master key");
+
+    let spawned = spawn(
+        &MqttConfig {
+            host: "127.0.0.1".to_string(),
+            port: broker.port,
+            tls: false,
+            username: None,
+            password: None,
+            client_id: "verifier-v2-unknown".to_string(),
+        },
+        Arc::clone(&store),
+        master.clone(),
+    );
+
+    let (client, mut eventloop) = AsyncClient::new(client_options(broker.port, "door1-dev2"), 8);
+    client
+        .subscribe("keygate/v2/door1/ack", QoS::AtLeastOnce)
+        .await
+        .expect("subscribe ack");
+    wait_for_suback(&mut eventloop).await;
+
+    let unknown_uid = "04090807060504";
+    let cmac_hex = compute_test_cmac(&master, unknown_uid, 5);
+    let tap_payload = json!({
+        "tap_id": "door1:2",
+        "uid": unknown_uid,
+        "counter": 5,
+        "cmac": cmac_hex,
+        "decision": null,
+        "reason": null,
+        "key_version": 1,
+    });
+
+    let (topic, ack) = publish_tap_until_ack(
+        &client,
+        &mut eventloop,
+        "keygate/v2/door1/tap",
+        &tap_payload,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(topic, "keygate/v2/door1/ack");
+
+    assert_eq!(ack["tap_id"], "door1:2");
+    assert!(ack["entry"].is_null(), "entry must be null for unknown tag");
+    assert_eq!(ack["counter_floor"], 5);
+    assert!(ack["time_s"].as_u64().unwrap() > 0);
+
+    let s = store.lock().unwrap();
+    let rep = s
+        .tap_report_by_id("door1:2")
+        .unwrap()
+        .expect("report saved");
+    assert_eq!(rep.decision.as_deref(), Some("denied"));
+    assert_eq!(rep.reason.as_deref(), Some("unknown_tag"));
+
+    spawned.presence_task.abort();
+    spawned.acl_task.abort();
+}
+
+#[tokio::test]
+async fn v2_tap_duplicate_tap_id_idempotency_over_the_wire() {
+    let broker = start_broker();
+    let (store, _db) = build_store("door1", 1);
+    let master = Key::from_hex(MASTER_HEX).expect("master key");
+
+    let spawned = spawn(
+        &MqttConfig {
+            host: "127.0.0.1".to_string(),
+            port: broker.port,
+            tls: false,
+            username: None,
+            password: None,
+            client_id: "verifier-v2-dup".to_string(),
+        },
+        Arc::clone(&store),
+        master.clone(),
+    );
+
+    let (client, mut eventloop) = AsyncClient::new(client_options(broker.port, "door1-dev3"), 8);
+    client
+        .subscribe("keygate/v2/door1/ack", QoS::AtLeastOnce)
+        .await
+        .expect("subscribe ack");
+    wait_for_suback(&mut eventloop).await;
+
+    let cmac_hex = compute_test_cmac(&master, UID_ACTIVE, 15);
+    let tap_payload = json!({
+        "tap_id": "door1:100",
+        "uid": UID_ACTIVE,
+        "counter": 15,
+        "cmac": cmac_hex,
+        "decision": null,
+        "reason": null,
+        "key_version": 1,
+    });
+
+    // 1st publish
+    let (_, ack1) = publish_tap_until_ack(
+        &client,
+        &mut eventloop,
+        "keygate/v2/door1/tap",
+        &tap_payload,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(ack1["tap_id"], "door1:100");
+    assert_eq!(ack1["counter_floor"], 15);
+
+    // 2nd publish with exact same tap_id (retransmission)
+    let (_, ack2) = publish_tap_until_ack(
+        &client,
+        &mut eventloop,
+        "keygate/v2/door1/tap",
+        &tap_payload,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(ack2["tap_id"], "door1:100");
+    assert_eq!(ack2["counter_floor"], 15);
+    assert_eq!(ack2["entry"], ack1["entry"]);
+
+    // Verify only 1 row exists in tap_reports for door1:100
+    let mut s = store.lock().unwrap();
+    let count: i64 = s
+        .conn_mut()
+        .query_row(
+            "SELECT COUNT(*) FROM tap_reports WHERE tap_id = 'door1:100'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "exactly one tap_reports row despite duplicate over the wire"
+    );
+
+    spawned.presence_task.abort();
+    spawned.acl_task.abort();
+}
+
+#[tokio::test]
+async fn v2_cross_door_duplicate_anomaly_detected() {
+    let broker = start_broker();
+    let (store, _db) = build_store("door1", 1);
+    let master = Key::from_hex(MASTER_HEX).expect("master key");
+
+    // Add door2 to devices
+    store
+        .lock()
+        .unwrap()
+        .upsert_device("door2", "gate", true)
+        .unwrap();
+
+    let spawned = spawn(
+        &MqttConfig {
+            host: "127.0.0.1".to_string(),
+            port: broker.port,
+            tls: false,
+            username: None,
+            password: None,
+            client_id: "verifier-v2-cross".to_string(),
+        },
+        Arc::clone(&store),
+        master.clone(),
+    );
+
+    let (client, mut eventloop) = AsyncClient::new(client_options(broker.port, "cross-dev"), 8);
+    client
+        .subscribe("keygate/v2/+/ack", QoS::AtLeastOnce)
+        .await
+        .expect("subscribe");
+    wait_for_suback(&mut eventloop).await;
+
+    // Door 1 reports counter 25 on UID_ACTIVE
+    let cmac_hex = compute_test_cmac(&master, UID_ACTIVE, 25);
+    let tap1 = json!({
+        "tap_id": "door1:201",
+        "uid": UID_ACTIVE,
+        "counter": 25,
+        "cmac": cmac_hex,
+        "decision": null,
+        "reason": null,
+        "key_version": 1,
+    });
+    let _ = publish_tap_until_ack(
+        &client,
+        &mut eventloop,
+        "keygate/v2/door1/tap",
+        &tap1,
+        Duration::from_secs(5),
+    )
+    .await;
+
+    // Door 2 reports the SAME counter 25 on UID_ACTIVE
+    let tap2 = json!({
+        "tap_id": "door2:201",
+        "uid": UID_ACTIVE,
+        "counter": 25,
+        "cmac": cmac_hex,
+        "decision": null,
+        "reason": null,
+        "key_version": 1,
+    });
+    let _ = publish_tap_until_ack(
+        &client,
+        &mut eventloop,
+        "keygate/v2/door2/tap",
+        &tap2,
+        Duration::from_secs(5),
+    )
+    .await;
+
+    // Verify anomaly record in store
+    let s = store.lock().unwrap();
+    let anomalies = s.list_anomalies().unwrap();
+    let cross_anomalies: Vec<_> = anomalies
+        .into_iter()
+        .filter(|a| a.kind == "cross_door_duplicate")
+        .collect();
+    assert_eq!(
+        cross_anomalies.len(),
+        1,
+        "cross_door_duplicate anomaly logged"
+    );
+    let anom = &cross_anomalies[0];
+    assert_eq!(anom.device_id.as_deref(), Some("door2"));
+    assert_eq!(anom.uid.as_deref(), Some(UID_ACTIVE));
+    assert!(anom.detail.as_deref().unwrap().contains("door1"));
+
+    spawned.presence_task.abort();
+    spawned.acl_task.abort();
+}
+
+#[tokio::test]
+async fn v2_cmac_fail_consult_records_outcome_and_returns_null_entry() {
+    let broker = start_broker();
+    let (store, _db) = build_store("door1", 1);
+    let master = Key::from_hex(MASTER_HEX).expect("master key");
+
+    let spawned = spawn(
+        &MqttConfig {
+            host: "127.0.0.1".to_string(),
+            port: broker.port,
+            tls: false,
+            username: None,
+            password: None,
+            client_id: "verifier-v2-cmac-fail".to_string(),
+        },
+        Arc::clone(&store),
+        master.clone(),
+    );
+
+    let (client, mut eventloop) = AsyncClient::new(client_options(broker.port, "door1-cmac"), 8);
+    client
+        .subscribe("keygate/v2/door1/ack", QoS::AtLeastOnce)
+        .await
+        .expect("subscribe");
+    wait_for_suback(&mut eventloop).await;
+
+    // Bad CMAC
+    let tap = json!({
+        "tap_id": "door1:301",
+        "uid": UID_ACTIVE,
+        "counter": 50,
+        "cmac": "0011223344556677", // bad cmac
+        "decision": null,
+        "reason": null,
+        "key_version": 1,
+    });
+
+    let (_, ack) = publish_tap_until_ack(
+        &client,
+        &mut eventloop,
+        "keygate/v2/door1/tap",
+        &tap,
+        Duration::from_secs(5),
+    )
+    .await;
+
+    assert_eq!(ack["tap_id"], "door1:301");
+    assert!(ack["entry"].is_null(), "entry must be null on cmac_fail");
+
+    // Verify DB
+    let s = store.lock().unwrap();
+    let rep = s
+        .tap_report_by_id("door1:301")
+        .unwrap()
+        .expect("report saved");
+    assert_eq!(rep.decision.as_deref(), Some("denied"));
+    assert_eq!(rep.reason.as_deref(), Some("cmac_fail"));
+
+    // Counter on tag must NOT have advanced to 50
+    let tag = s.tag_by_uid(UID_ACTIVE).unwrap().unwrap();
+    assert_eq!(
+        tag.last_counter, 0,
+        "tag counter must NOT advance on cmac_fail"
+    );
+
+    spawned.presence_task.abort();
+    spawned.acl_task.abort();
+}
+
+#[tokio::test]
+async fn v2_hello_updates_last_seen_and_handles_unregistered_device() {
+    let broker = start_broker();
+    let (store, _db) = build_store("door1", 1);
+    let master = Key::from_hex(MASTER_HEX).expect("master key");
+
+    let spawned = spawn(
+        &MqttConfig {
+            host: "127.0.0.1".to_string(),
+            port: broker.port,
+            tls: false,
+            username: None,
+            password: None,
+            client_id: "verifier-v2-hello".to_string(),
+        },
+        Arc::clone(&store),
+        master.clone(),
+    );
+
+    let (client, mut eventloop) = AsyncClient::new(client_options(broker.port, "door-hello"), 8);
+    let pump = tokio::spawn(async move {
+        loop {
+            if eventloop.poll().await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // 1. Hello from registered door1
+    let hello1_payload = json!({
+        "roster_gen": 0,
+        "key_versions": [1],
+        "outbox_depth": 0,
+        "time_uncertain": false,
+        "git_sha": "testsha1",
+    });
+
+    let mut updated1 = false;
+    for _ in 0..30 {
+        let _ = client
+            .publish(
+                "keygate/v2/door1/hello",
+                QoS::AtLeastOnce,
+                false,
+                hello1_payload.to_string(),
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let s = store.lock().unwrap();
+        let devices = s.list_devices().unwrap();
+        if let Some(d1) = devices.iter().find(|d| d.device_id == "door1") {
+            if d1.last_seen.is_some() {
+                updated1 = true;
+                break;
+            }
+        }
+    }
+    assert!(updated1, "door1 last_seen updated on hello");
+
+    // 2. Hello from UNREGISTERED door_new (door predates registration)
+    let hello_new_payload = json!({
+        "roster_gen": 5,
+        "key_versions": [1],
+        "outbox_depth": 2,
+        "time_uncertain": true,
+        "git_sha": "testsha2",
+    });
+
+    let mut updated_new = false;
+    for _ in 0..30 {
+        let _ = client
+            .publish(
+                "keygate/v2/door_new/hello",
+                QoS::AtLeastOnce,
+                false,
+                hello_new_payload.to_string(),
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let s = store.lock().unwrap();
+        let devices = s.list_devices().unwrap();
+        if let Some(d_new) = devices.iter().find(|d| d.device_id == "door_new") {
+            if d_new.last_seen.is_some() {
+                updated_new = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        updated_new,
+        "unregistered device registered via hello with last_seen"
+    );
+
+    spawned.presence_task.abort();
+    spawned.acl_task.abort();
+    pump.abort();
+}
+
+#[tokio::test]
+async fn v2_report_audit_only_advances_counter_and_never_publishes_ack() {
+    let broker = start_broker();
+    let (store, _db) = build_store("door1", 1);
+    let master = Key::from_hex(MASTER_HEX).expect("master key");
+
+    let spawned = spawn(
+        &MqttConfig {
+            host: "127.0.0.1".to_string(),
+            port: broker.port,
+            tls: false,
+            username: None,
+            password: None,
+            client_id: "verifier-v2-report".to_string(),
+        },
+        Arc::clone(&store),
+        master.clone(),
+    );
+
+    // Sub client listens on keygate/v2/door1/ack
+    let (sub_client, mut sub_eventloop) =
+        AsyncClient::new(client_options(broker.port, "door1-report-sub"), 8);
+    sub_client
+        .subscribe("keygate/v2/door1/ack", QoS::AtLeastOnce)
+        .await
+        .expect("subscribe ack");
+    wait_for_suback(&mut sub_eventloop).await;
+
+    // Pub client publishes report and pumps its own event loop
+    let (pub_client, mut pub_eventloop) =
+        AsyncClient::new(client_options(broker.port, "door1-report-pub"), 8);
+    let pub_pump = tokio::spawn(async move {
+        loop {
+            if pub_eventloop.poll().await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let cmac_hex = compute_test_cmac(&master, UID_ACTIVE, 40);
+    let report_payload = json!({
+        "tap_id": "door1:401",
+        "uid": UID_ACTIVE,
+        "counter": 40,
+        "cmac": cmac_hex,
+        "decision": "granted",
+        "reason": "granted",
+        "key_version": 1,
+    });
+
+    let mut delivered = false;
+    for _ in 0..20 {
+        let _ = pub_client
+            .publish(
+                "keygate/v2/door1/report",
+                QoS::AtLeastOnce,
+                false,
+                report_payload.to_string(),
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let s = store.lock().unwrap();
+        if let Ok(Some(rep)) = s.tap_report_by_id("door1:401") {
+            assert_eq!(rep.decision.as_deref(), Some("granted"));
+            assert_eq!(rep.reason.as_deref(), Some("granted"));
+            assert_eq!(rep.kind, "report");
+            delivered = true;
+            break;
+        }
+    }
+    assert!(delivered, "report ingested into tap_reports table");
+
+    // Counter advanced on tag
+    {
+        let s = store.lock().unwrap();
+        let tag = s.tag_by_uid(UID_ACTIVE).unwrap().unwrap();
+        assert_eq!(tag.last_counter, 40, "report advances tag last_counter");
+    }
+
+    // Verify NO ack was published to sub client
+    let incoming = tokio::time::timeout(Duration::from_millis(600), sub_eventloop.poll()).await;
+    if let Ok(Ok(Event::Incoming(Incoming::Publish(p)))) = incoming {
+        panic!("unexpected publish received on report: {}", p.topic);
+    }
+
+    spawned.presence_task.abort();
+    spawned.acl_task.abort();
+    pub_pump.abort();
+}
+
+#[test]
+fn test_rotation_activation_protocol_pure_fn() {
+    use access_control_verifier::mqtt::{
+        check_rotation_activation, DeviceHelloStatus, RotationActivationOutcome,
+    };
+
+    // 1. Partial fleet ack: door1 has v2, door2 only has v1, writer has nothing
+    let fleet_partial = vec![
+        DeviceHelloStatus {
+            device_id: "door1".to_string(),
+            offline_verify: true,
+            key_versions: vec![1, 2],
+        },
+        DeviceHelloStatus {
+            device_id: "door2".to_string(),
+            offline_verify: true,
+            key_versions: vec![1],
+        },
+        DeviceHelloStatus {
+            device_id: "writer1".to_string(),
+            offline_verify: false,
+            key_versions: vec![],
+        },
+    ];
+
+    let outcome_partial = check_rotation_activation(2, &fleet_partial);
+    assert_eq!(
+        outcome_partial,
+        RotationActivationOutcome::WaitingForAcks {
+            candidate_version: 2,
+            pending_devices: vec!["door2".to_string()],
+        },
+        "v2 must not activate when door2 has not echoed v2"
+    );
+
+    // 2. Full fleet ack: both offline_verify doors have echoed v2
+    let fleet_full = vec![
+        DeviceHelloStatus {
+            device_id: "door1".to_string(),
+            offline_verify: true,
+            key_versions: vec![1, 2],
+        },
+        DeviceHelloStatus {
+            device_id: "door2".to_string(),
+            offline_verify: true,
+            key_versions: vec![1, 2],
+        },
+        DeviceHelloStatus {
+            device_id: "writer1".to_string(),
+            offline_verify: false,
+            key_versions: vec![], // non-offline_verify ignored
+        },
+    ];
+
+    let outcome_full = check_rotation_activation(2, &fleet_full);
+    assert_eq!(
+        outcome_full,
+        RotationActivationOutcome::Activated { new_version: 2 },
+        "v2 activates when all offline_verify devices have echoed v2"
+    );
+}
+
+#[test]
+fn test_no_pulse_ms_in_any_v2_payload() {
+    use access_control_verifier::mqtt::{AuthoritativeFlipPayload, V2AckEntry, V2AckPayload};
+    use access_control_verifier::sync_projection::{RosterEntry, SyncChunk};
+
+    // 1. V2AckPayload
+    let ack = V2AckPayload {
+        tap_id: "door1:1".to_string(),
+        entry: Some(V2AckEntry {
+            uid: "04010203040506".to_string(),
+            status: "active".to_string(),
+            active_until: Some("2027-01-01T00:00:00Z".to_string()),
+            key_version: 1,
+            entry_gen: 1,
+            global_counter: 10,
+        }),
+        counter_floor: 10,
+        time_s: 1700000000,
+    };
+    let ack_json = serde_json::to_string(&ack).unwrap();
+    assert!(
+        !ack_json.contains("pulse"),
+        "ack payload must never contain pulse field"
+    );
+
+    // 2. AuthoritativeFlipPayload
+    let flip = AuthoritativeFlipPayload {
+        authoritative: true,
+    };
+    let flip_json = serde_json::to_string(&flip).unwrap();
+    assert!(
+        !flip_json.contains("pulse"),
+        "flip payload must never contain pulse field"
+    );
+
+    // 3. Commission payload
+    let comm_json = json!({ "key_version": 1, "master_hex": "0123456789abcdef" }).to_string();
+    assert!(
+        !comm_json.contains("pulse"),
+        "commission payload must never contain pulse field"
+    );
+
+    // 4. Binary sync chunk
+    let chunk = SyncChunk {
+        roster_gen: 1,
+        chunk: 0,
+        of: 1,
+        entries: vec![RosterEntry {
+            uid: [4; 7],
+            counter: 0,
+            expiry_epoch: 1700000000,
+            key_version: 1,
+            entry_gen: 1,
+            flags: 0,
+        }],
+    };
+    let chunk_bytes = chunk.encode().unwrap();
+    let pulse_bytes = b"pulse";
+    let has_pulse = chunk_bytes
+        .windows(pulse_bytes.len())
+        .any(|w| w == pulse_bytes);
+    assert!(!has_pulse, "binary chunk must never contain pulse keyword");
+}
+
+#[test]
+fn test_no_key_material_outside_commission_topic() {
+    use access_control_verifier::mqtt::{AuthoritativeFlipPayload, V2AckEntry, V2AckPayload};
+    use access_control_verifier::sync_projection::{RosterEntry, SyncChunk};
+
+    let master_raw: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+    let master_hex = hex::encode(master_raw);
+
+    // Ack payload
+    let ack = V2AckPayload {
+        tap_id: "door1:1".to_string(),
+        entry: Some(V2AckEntry {
+            uid: "04010203040506".to_string(),
+            status: "active".to_string(),
+            active_until: Some("2027-01-01T00:00:00Z".to_string()),
+            key_version: 1,
+            entry_gen: 1,
+            global_counter: 10,
+        }),
+        counter_floor: 10,
+        time_s: 1700000000,
+    };
+    let ack_json = serde_json::to_string(&ack).unwrap();
+    assert!(!ack_json.contains(&master_hex));
+
+    // Flip payload
+    let flip_json = serde_json::to_string(&AuthoritativeFlipPayload {
+        authoritative: true,
+    })
+    .unwrap();
+    assert!(!flip_json.contains(&master_hex));
+
+    // Sync chunk
+    let chunk = SyncChunk {
+        roster_gen: 1,
+        chunk: 0,
+        of: 1,
+        entries: vec![RosterEntry {
+            uid: [4; 7],
+            counter: 0,
+            expiry_epoch: 1700000000,
+            key_version: 1,
+            entry_gen: 1,
+            flags: 0,
+        }],
+    };
+    let chunk_bytes = chunk.encode().unwrap();
+    let contains_key = chunk_bytes
+        .windows(master_raw.len())
+        .any(|w| w == master_raw);
+    assert!(
+        !contains_key,
+        "sync chunk must never contain master key bytes"
+    );
+}
+
+#[tokio::test]
+async fn v2_hello_full_snapshot_sync_and_authoritative_flip_and_commission() {
+    let broker = start_broker();
+    let (store, _db) = build_store("door1", 1); // offline_verify = 1
+    let master = Key::from_hex(MASTER_HEX).expect("master key");
+
+    let spawned = spawn(
+        &MqttConfig {
+            host: "127.0.0.1".to_string(),
+            port: broker.port,
+            tls: false,
+            username: None,
+            password: None,
+            client_id: "verifier-v2-full-sync".to_string(),
+        },
+        Arc::clone(&store),
+        master.clone(),
+    );
+
+    let (client, mut eventloop) = AsyncClient::new(client_options(broker.port, "door1-sub"), 16);
+    client
+        .subscribe("keygate/v2/door1/commission", QoS::AtLeastOnce)
+        .await
+        .expect("sub commission");
+    wait_for_suback(&mut eventloop).await;
+
+    client
+        .subscribe("keygate/v2/door1/sync", QoS::AtLeastOnce)
+        .await
+        .expect("sub sync");
+    wait_for_suback(&mut eventloop).await;
+
+    // Send hello with roster_gen: 0 and empty key_versions: []
+    let hello = json!({
+        "roster_gen": 0,
+        "key_versions": [],
+        "outbox_depth": 0,
+        "time_uncertain": false,
+        "git_sha": "sha_hello_sync",
+    });
+
+    client
+        .publish(
+            "keygate/v2/door1/hello",
+            QoS::AtLeastOnce,
+            false,
+            hello.to_string(),
+        )
+        .await
+        .expect("pub hello");
+
+    // We expect:
+    // 1. Commission message on keygate/v2/door1/commission
+    // 2. Binary sync chunk on keygate/v2/door1/sync
+    // 3. Authoritative flip on keygate/v2/door1/sync
+    let mut got_commission = false;
+    let mut got_sync_chunk = false;
+    let mut got_flip = false;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        let incoming = tokio::time::timeout(Duration::from_millis(500), eventloop.poll()).await;
+        if let Ok(Ok(Event::Incoming(Incoming::Publish(p)))) = incoming {
+            if p.topic == "keygate/v2/door1/commission" {
+                let body: Value = serde_json::from_slice(&p.payload).unwrap();
+                assert_eq!(body["key_version"], 1);
+                assert_eq!(body["master_hex"], MASTER_HEX);
+                got_commission = true;
+            } else if p.topic == "keygate/v2/door1/sync" {
+                if let Ok(chunk) =
+                    access_control_verifier::sync_projection::SyncChunk::decode(&p.payload)
+                {
+                    assert_eq!(chunk.chunk, 0);
+                    assert_eq!(chunk.of, 1);
+                    assert_eq!(chunk.entries.len(), 1);
+                    assert_eq!(
+                        chunk.entries[0].uid,
+                        [0x04, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06]
+                    );
+                    got_sync_chunk = true;
+                } else if let Ok(flip) = serde_json::from_slice::<Value>(&p.payload) {
+                    if flip["authoritative"] == true {
+                        got_flip = true;
+                    }
+                }
+            }
+            if got_commission && got_sync_chunk && got_flip {
+                break;
+            }
+        }
+    }
+
+    assert!(got_commission, "commission message received");
+    assert!(got_sync_chunk, "binary sync chunk received and decoded");
+    assert!(got_flip, "authoritative flip message received");
+
+    spawned.presence_task.abort();
+    spawned.acl_task.abort();
+}
+
+#[tokio::test]
+async fn v2_hello_delta_sync_publishes_deltas() {
+    let broker = start_broker();
+    let (store, _db) = build_store("door1", 1);
+    let master = Key::from_hex(MASTER_HEX).expect("master key");
+
+    // Add another tag for m1 => bumps roster_gen, records event
+    let now = chrono::Utc::now().to_rfc3339();
+    {
+        let mut s = store.lock().unwrap();
+        s.enroll_tag("04aabbccddeeff", "m1", 1, &now).unwrap();
+    }
+
+    let spawned = spawn(
+        &MqttConfig {
+            host: "127.0.0.1".to_string(),
+            port: broker.port,
+            tls: false,
+            username: None,
+            password: None,
+            client_id: "verifier-v2-delta-sync".to_string(),
+        },
+        Arc::clone(&store),
+        master.clone(),
+    );
+
+    let (client, mut eventloop) =
+        AsyncClient::new(client_options(broker.port, "door1-delta-sub"), 16);
+    client
+        .subscribe("keygate/v2/door1/sync", QoS::AtLeastOnce)
+        .await
+        .expect("sub sync");
+    wait_for_suback(&mut eventloop).await;
+
+    // Device is at roster_gen: 1, holds key_version: [1]
+    let hello = json!({
+        "roster_gen": 1,
+        "key_versions": [1],
+        "outbox_depth": 0,
+        "time_uncertain": false,
+        "git_sha": "sha_delta_test",
+    });
+
+    client
+        .publish(
+            "keygate/v2/door1/hello",
+            QoS::AtLeastOnce,
+            false,
+            hello.to_string(),
+        )
+        .await
+        .expect("pub hello");
+
+    let mut got_delta_chunk = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        let incoming = tokio::time::timeout(Duration::from_millis(500), eventloop.poll()).await;
+        if let Ok(Ok(Event::Incoming(Incoming::Publish(p)))) = incoming {
+            if p.topic == "keygate/v2/door1/sync" {
+                if let Ok(chunk) =
+                    access_control_verifier::sync_projection::SyncChunk::decode(&p.payload)
+                {
+                    assert!(!chunk.entries.is_empty());
+                    got_delta_chunk = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    assert!(got_delta_chunk, "delta sync chunk received and decoded");
+
+    spawned.presence_task.abort();
+    spawned.acl_task.abort();
+}

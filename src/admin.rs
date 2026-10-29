@@ -26,6 +26,8 @@ pub fn router(state: AppState) -> Router {
         .route("/jobs/{job_id}", delete(cancel_job))
         .route("/overrides", get(list_overrides).post(create_override))
         .route("/audit", get(list_audit))
+        .route("/anomalies", get(list_anomalies))
+        .route("/tap-reports", get(list_tap_reports))
         .route("/sync-state", get(sync_state))
         .route("/sync", post(trigger_sync))
         .route("/config", get(list_config).post(set_config));
@@ -382,7 +384,29 @@ async fn arm_job(State(state): State<AppState>, Json(req): Json<ArmJobRequest>) 
             &now.to_rfc3339(),
             &expires_at,
         ) {
-            Ok(id) => id,
+            Ok(id) => {
+                tracing::info!(
+                    member_key = %req.member_key,
+                    device_id = %req.device_id,
+                    job_id = %id,
+                    is_wildcard,
+                    "provisioning job armed by admin"
+                );
+                let _ = store.audit_event_with_member(
+                    &now.to_rfc3339(),
+                    Some(&req.device_id),
+                    if uid_hex.is_empty() {
+                        None
+                    } else {
+                        Some(&uid_hex)
+                    },
+                    None,
+                    "granted",
+                    "provision_armed",
+                    Some(&req.member_key),
+                );
+                id
+            }
             Err(_) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -514,6 +538,58 @@ async fn list_audit(State(state): State<AppState>, Query(query): Query<AuditQuer
         query.decision.as_deref(),
     ) {
         Ok(audit) => (StatusCode::OK, Json(audit)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct AnomaliesQuery {
+    limit: Option<u32>,
+    kind: Option<String>,
+    device: Option<String>,
+}
+
+async fn list_anomalies(
+    State(state): State<AppState>,
+    Query(query): Query<AnomaliesQuery>,
+) -> Response {
+    let store = state.store.lock().expect("store lock poisoned");
+    match store.list_anomalies_filtered(
+        query.limit.unwrap_or(50),
+        query.kind.as_deref(),
+        query.device.as_deref(),
+    ) {
+        Ok(anomalies) => (StatusCode::OK, Json(anomalies)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct TapReportsQuery {
+    limit: Option<u32>,
+    device: Option<String>,
+    uid: Option<String>,
+}
+
+async fn list_tap_reports(
+    State(state): State<AppState>,
+    Query(query): Query<TapReportsQuery>,
+) -> Response {
+    let store = state.store.lock().expect("store lock poisoned");
+    match store.list_tap_reports(
+        query.limit.unwrap_or(50),
+        query.device.as_deref(),
+        query.uid.as_deref(),
+    ) {
+        Ok(reports) => (StatusCode::OK, Json(reports)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),

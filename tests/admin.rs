@@ -18,7 +18,9 @@ struct Fixture {
 }
 
 fn setup() -> Fixture {
-    std::env::set_var("ADMIN_BEARER_TOKEN", "test-token");
+    unsafe {
+        std::env::set_var("ADMIN_BEARER_TOKEN", "test-token");
+    }
     let db = NamedTempFile::new().expect("temp db file");
     let mut store = Store::open(db.path()).expect("store opens");
 
@@ -295,7 +297,9 @@ async fn del(app: &axum::Router, path: &str, token: Option<&str>) -> (StatusCode
 }
 
 fn writer_fixture() -> Fixture {
-    std::env::set_var("ADMIN_BEARER_TOKEN", "test-token");
+    unsafe {
+        std::env::set_var("ADMIN_BEARER_TOKEN", "test-token");
+    }
     let db = NamedTempFile::new().expect("temp db file");
     let mut store = Store::open(db.path()).expect("store opens");
     store.conn_mut().execute(
@@ -424,4 +428,178 @@ async fn test_admin_page_renders_provisioning_section() {
     );
     assert!(html.contains("Arm writer"), "arm button missing");
     assert!(html.contains("/admin/api/jobs"), "arm endpoint missing");
+}
+
+#[tokio::test]
+async fn test_admin_page_renders_v2_surfaces() {
+    let f = setup();
+    let mut builder = Request::builder().uri("/admin");
+    builder = builder.header("Authorization", "Bearer test-token");
+    let req = builder.body(Body::empty()).unwrap();
+    let res = f.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&bytes);
+
+    // Audit table has member key column
+    assert!(
+        html.contains("<th>Member Key</th>"),
+        "audit log table missing Member Key header"
+    );
+
+    // Anomaly Feed section and table
+    assert!(
+        html.contains("id=\"anomalies-table\""),
+        "anomalies table missing"
+    );
+    assert!(
+        html.contains("Anomaly Feed"),
+        "anomaly feed heading missing"
+    );
+
+    // Tap Reports section and table
+    assert!(
+        html.contains("id=\"tap-reports-table\""),
+        "tap-reports table missing"
+    );
+    assert!(html.contains("Tap Reports"), "tap reports heading missing");
+
+    // Devices & v2 sync notice
+    assert!(
+        html.contains("Devices &amp; v2 Sync") || html.contains("Devices & v2 Sync"),
+        "devices & v2 sync heading missing"
+    );
+    assert!(
+        html.contains("roster_gen / hello handshakes"),
+        "v2 sync streaming note missing"
+    );
+}
+
+#[tokio::test]
+async fn test_anomalies_and_tap_reports_api_auth_and_filters() {
+    let f = setup();
+
+    // 1. Unauthenticated requests return 401
+    let (status, _) = get(&f.app, "/admin/api/anomalies", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = get(&f.app, "/admin/api/tap-reports", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Populate test data directly
+    {
+        // We can access store via state or insert in db
+        // Wait, setup() provides store Arc in state, but f only has app.
+        // Let's create an app with store accessible or use raw sql on f._db.path()
+        let conn = rusqlite::Connection::open(f._db.path()).unwrap();
+        conn.execute(
+            "INSERT INTO anomalies (id, ts, device_id, uid, kind, detail) VALUES
+             (1, '2026-10-28T10:00:00Z', 'keygate-frontdoor', '04aabbccddee01', 'counter_regression', 'regressed counter'),
+             (2, '2026-10-28T10:05:00Z', 'keygate-backdoor', '04aabbccddee02', 'saturation', 'counter maxed');",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO tap_reports (tap_id, device_id, uid, counter, decision, reason, time_uncertain, dev_ts, recv_ts, key_version, kind) VALUES
+             ('keygate-frontdoor:1', 'keygate-frontdoor', '04aabbccddee01', 101, 'granted', 'granted', 0, '2026-10-28T10:00:00Z', '2026-10-28T10:00:01Z', 1, 'dna'),
+             ('keygate-frontdoor:2', 'keygate-frontdoor', '04aabbccddee01', 102, 'granted', 'granted', 1, '2026-10-28T10:01:00Z', '2026-10-28T10:01:01Z', 1, 'dna'),
+             ('keygate-backdoor:1', 'keygate-backdoor', '04aabbccddee02', 50, 'denied', 'expired', 0, '2026-10-28T10:02:00Z', '2026-10-28T10:02:01Z', 1, 'dna');",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO audit_log (id, ts, device_id, uid, counter, decision, reason, member_key) VALUES
+             (10, '2026-10-28T10:00:00Z', 'keygate-frontdoor', '04aabbccddee01', 101, 'granted', 'granted', 'member-alice');",
+            [],
+        ).unwrap();
+    }
+
+    // 2. Fetch anomalies without filters
+    let (status, body) = get(&f.app, "/admin/api/anomalies", Some("test-token")).await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = body.as_array().expect("array");
+    assert_eq!(arr.len(), 2);
+    // newest first (id 2 then 1)
+    assert_eq!(arr[0]["id"], 2);
+    assert_eq!(arr[1]["id"], 1);
+
+    // Filter anomalies by kind
+    let (status, body) = get(
+        &f.app,
+        "/admin/api/anomalies?kind=counter_regression",
+        Some("test-token"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = body.as_array().expect("array");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["kind"], "counter_regression");
+
+    // Filter anomalies by device
+    let (status, body) = get(
+        &f.app,
+        "/admin/api/anomalies?device=keygate-backdoor",
+        Some("test-token"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = body.as_array().expect("array");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["device_id"], "keygate-backdoor");
+
+    // 3. Fetch tap-reports without filters
+    let (status, body) = get(&f.app, "/admin/api/tap-reports", Some("test-token")).await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = body.as_array().expect("array");
+    assert_eq!(arr.len(), 3);
+
+    // Filter tap-reports by device
+    let (status, body) = get(
+        &f.app,
+        "/admin/api/tap-reports?device=keygate-frontdoor",
+        Some("test-token"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = body.as_array().expect("array");
+    assert_eq!(arr.len(), 2);
+    assert!(arr.iter().all(|r| r["device_id"] == "keygate-frontdoor"));
+
+    // Filter tap-reports by uid
+    let (status, body) = get(
+        &f.app,
+        "/admin/api/tap-reports?uid=04aabbccddee02",
+        Some("test-token"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = body.as_array().expect("array");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["tap_id"], "keygate-backdoor:1");
+
+    // Limit check
+    let (status, body) = get(&f.app, "/admin/api/tap-reports?limit=1", Some("test-token")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().unwrap().len(), 1);
+
+    // Time uncertain check
+    let (status, body) = get(
+        &f.app,
+        "/admin/api/tap-reports?device=keygate-frontdoor",
+        Some("test-token"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = body.as_array().unwrap();
+    let has_tu = arr.iter().any(|r| r["time_uncertain"] == true);
+    let has_not_tu = arr.iter().any(|r| r["time_uncertain"] == false);
+    assert!(has_tu && has_not_tu);
+
+    // 4. Audit log returns member_key
+    let (status, body) = get(&f.app, "/admin/api/audit", Some("test-token")).await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = body.as_array().expect("array");
+    assert!(!arr.is_empty());
+    assert_eq!(arr[0]["member_key"], "member-alice");
 }

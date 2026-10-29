@@ -489,6 +489,13 @@
             background: var(--tertiary);
             color: var(--neutral);
         }
+        .badge-warning {
+            background: #D9822B;
+            color: #FFFFFF;
+        }
+        tr.row-warning {
+            background-color: #FFF6E6 !important;
+        }
 
         @media (max-width: 767px) {
             body {
@@ -594,12 +601,15 @@
             </div>
         </section>
 
-        <!-- 4. DEVICES -->
+        <!-- 4. DEVICES & V2 SYNC -->
         <section class="card">
             <div class="card-header">
-                <h2>Devices</h2>
+                <h2>Devices & v2 Sync</h2>
                 <span class="card-ref">FIG. 04 · READER / WRITER HARDWARE</span>
             </div>
+            <p style="font-size: 13px; color: var(--on-surface-muted); margin-top: 0;">
+                Note: v2 sync facts (roster_gen / hello handshakes) stream live to verifier logs until Task 5 persistent telemetry lands.
+            </p>
             <div class="table-wrap">
                 <table id="devices-table">
                     <tr><th>Device ID</th><th>Role</th><th>Offline Verify</th><th>Presence</th><th>Last Seen</th></tr>
@@ -646,7 +656,33 @@
             </div>
             <div class="table-wrap">
                 <table id="audit-table">
-                    <tr><th>ID</th><th>Time</th><th>Device</th><th>UID</th><th>Counter</th><th>Decision</th><th>Reason</th></tr>
+                    <tr><th>ID</th><th>Time</th><th>Device</th><th>UID</th><th>Member Key</th><th>Counter</th><th>Decision</th><th>Reason</th></tr>
+                </table>
+            </div>
+        </section>
+
+        <!-- 7. ANOMALY FEED -->
+        <section class="card">
+            <div class="card-header">
+                <h2>Anomaly Feed</h2>
+                <span class="card-ref">FIG. 07 · DIVERGENCE & FAULT MONITOR</span>
+            </div>
+            <div class="table-wrap">
+                <table id="anomalies-table">
+                    <tr><th>ID</th><th>Time</th><th>Device</th><th>UID</th><th>Kind</th><th>Detail</th></tr>
+                </table>
+            </div>
+        </section>
+
+        <!-- 8. TAP REPORTS VIEW -->
+        <section class="card">
+            <div class="card-header">
+                <h2>Tap Reports (v2 Offline/Online Audit)</h2>
+                <span class="card-ref">FIG. 08 · V2 OUTBOX TAP INGEST</span>
+            </div>
+            <div class="table-wrap">
+                <table id="tap-reports-table">
+                    <tr><th>Tap ID</th><th>Time (Recv)</th><th>Device</th><th>UID</th><th>Counter</th><th>Decision</th><th>Reason</th><th>Time Uncertain</th><th>Kind</th></tr>
                 </table>
             </div>
         </section>
@@ -757,10 +793,36 @@
 
             api('/audit').then(logs => {
                 const tbody = document.getElementById('audit-table');
-                tbody.innerHTML = '<tr><th>ID</th><th>Time</th><th>Device</th><th>UID</th><th>Counter</th><th>Decision</th><th>Reason</th></tr>';
+                tbody.innerHTML = '<tr><th>ID</th><th>Time</th><th>Device</th><th>UID</th><th>Member Key</th><th>Counter</th><th>Decision</th><th>Reason</th></tr>';
                 logs.forEach(l => {
                     const tr = document.createElement('tr');
-                    tr.innerHTML = `<td>${l.id}</td><td>${l.ts}</td><td>${l.device_id ? '<code>'+l.device_id+'</code>' : ''}</td><td>${l.uid ? '<code>'+l.uid+'</code>' : ''}</td><td>${l.counter||''}</td><td>${l.decision}</td><td>${l.reason}</td>`;
+                    tr.innerHTML = `<td>${l.id}</td><td>${l.ts}</td><td>${l.device_id ? '<code>'+l.device_id+'</code>' : ''}</td><td>${l.uid ? '<code>'+l.uid+'</code>' : ''}</td><td>${l.member_key ? '<code>'+l.member_key+'</code>' : ''}</td><td>${l.counter||''}</td><td>${l.decision}</td><td>${l.reason}</td>`;
+                    tbody.appendChild(tr);
+                });
+            });
+
+            api('/anomalies').then(anomalies => {
+                const tbody = document.getElementById('anomalies-table');
+                tbody.innerHTML = '<tr><th>ID</th><th>Time</th><th>Device</th><th>UID</th><th>Kind</th><th>Detail</th></tr>';
+                anomalies.forEach(a => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `<td>${a.id}</td><td>${a.ts}</td><td>${a.device_id ? '<code>'+a.device_id+'</code>' : ''}</td><td>${a.uid ? '<code>'+a.uid+'</code>' : ''}</td><td><span class="badge badge-warning">${a.kind}</span></td><td>${a.detail||''}</td>`;
+                    tbody.appendChild(tr);
+                });
+            });
+
+            api('/tap-reports').then(reports => {
+                const tbody = document.getElementById('tap-reports-table');
+                tbody.innerHTML = '<tr><th>Tap ID</th><th>Time (Recv)</th><th>Device</th><th>UID</th><th>Counter</th><th>Decision</th><th>Reason</th><th>Time Uncertain</th><th>Kind</th></tr>';
+                reports.forEach(r => {
+                    const tr = document.createElement('tr');
+                    if (r.time_uncertain) {
+                        tr.className = 'row-warning';
+                    }
+                    const tuBadge = r.time_uncertain
+                        ? '<span class="badge badge-warning">UNCERTAIN</span>'
+                        : '<span style="color:var(--on-surface-muted);">exact</span>';
+                    tr.innerHTML = `<td><code>${r.tap_id}</code></td><td>${r.recv_ts}</td><td><code>${r.device_id}</code></td><td><code>${r.uid}</code></td><td>${r.counter}</td><td>${r.decision||''}</td><td>${r.reason||''}</td><td>${tuBadge}</td><td>${r.kind}</td>`;
                     tbody.appendChild(tr);
                 });
             });

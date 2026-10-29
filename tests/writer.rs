@@ -429,3 +429,102 @@ fn wildcard_claim_binds_uid_and_builds_keyed_payload() {
     // A malformed uid is refused without mutating the job.
     assert!(claim_and_build(&f.store, &master, DEVICE_WRITER, &job_id, "zz", &now).is_none());
 }
+
+#[tokio::test]
+async fn test_claim_nack_on_expired_and_consumed_jobs() {
+    use access_control_verifier::mqtt::{resolve_claim, ClaimResult};
+
+    let f = build();
+    let master = Key::from_hex(MASTER_HEX).expect("master key hex");
+    let now = "2026-10-06T10:00:00Z";
+
+    // 1. Create a job that expires in 10 seconds
+    let expires = "2026-10-06T10:00:10Z";
+    let job_id = {
+        let mut store = f.store.lock().unwrap();
+        store
+            .create_job("", "member_1", DEVICE_WRITER, now, expires)
+            .unwrap()
+    };
+
+    // Before expiry, claim resolves to KeyedJob
+    let res_valid = resolve_claim(&f.store, &master, DEVICE_WRITER, &job_id, UID_NEW, now);
+    match res_valid {
+        ClaimResult::KeyedJob { topic, payload } => {
+            assert_eq!(topic, format!("writer/{DEVICE_WRITER}/job"));
+            assert!(payload.contains(&job_id));
+        }
+        other => panic!("expected KeyedJob, got {other:?}"),
+    }
+
+    // Now test claim when expired (now is past expires_at)
+    let past_now = "2026-10-06T10:00:15Z";
+    let res_expired = resolve_claim(&f.store, &master, DEVICE_WRITER, &job_id, UID_NEW, past_now);
+    match res_expired {
+        ClaimResult::Nack { topic, payload } => {
+            assert_eq!(topic, format!("writer/{DEVICE_WRITER}/job"));
+            let v: Value = serde_json::from_str(&payload).expect("json");
+            assert_eq!(v["nack"], true);
+            assert_eq!(v["job_id"], job_id);
+            assert_eq!(v["reason"], "expired");
+        }
+        other => panic!("expected Nack(expired), got {other:?}"),
+    }
+
+    // Now complete (consume) the job
+    {
+        let mut store = f.store.lock().unwrap();
+        // Consume it
+        let _ = access_control_verifier::writer::consume_job(
+            &mut store,
+            &job_id,
+            10,
+            now,
+            Some(DEVICE_WRITER),
+        );
+    }
+
+    // Test claim against consumed job
+    let res_consumed = resolve_claim(&f.store, &master, DEVICE_WRITER, &job_id, UID_NEW, now);
+    match res_consumed {
+        ClaimResult::Nack { topic, payload } => {
+            assert_eq!(topic, format!("writer/{DEVICE_WRITER}/job"));
+            let v: Value = serde_json::from_str(&payload).expect("json");
+            assert_eq!(v["nack"], true);
+            assert_eq!(v["job_id"], job_id);
+            assert_eq!(v["reason"], "consumed");
+        }
+        other => panic!("expected Nack(consumed), got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_arm_populates_member_key_in_audit_log() {
+    let f = build();
+
+    let (status, body) = post(
+        &f.app,
+        "/v1/jobs",
+        Some(ADMIN_TOKEN),
+        json!({
+            "uid": "",
+            "member_key": "audit_member_42",
+            "device_id": DEVICE_WRITER,
+            "ttl_secs": 60,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    let _job_id = body["job_id"].as_str().unwrap();
+
+    let store = f.store.lock().unwrap();
+    let audits = store.list_audit(10, None, None).unwrap();
+    let arm_audit = audits
+        .iter()
+        .find(|a| a.reason == "provision_armed")
+        .expect("provision_armed audit log found");
+
+    assert_eq!(arm_audit.member_key.as_deref(), Some("audit_member_42"));
+    assert_eq!(arm_audit.device_id.as_deref(), Some(DEVICE_WRITER));
+}

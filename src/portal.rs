@@ -489,7 +489,12 @@ fn tap_generic_page() -> Response {
     .into_response()
 }
 
-async fn tap_landing(state: PortalState, uid_param: String, c: String, cmac_hex: String) -> Response {
+async fn tap_landing(
+    state: PortalState,
+    uid_param: String,
+    c: String,
+    cmac_hex: String,
+) -> Response {
     // Cards mirror their UID as UPPERCASE hex; the tags table stores
     // lowercase. Normalize before any lookup (the MQTT door path does the
     // same in api::auth).
@@ -521,14 +526,18 @@ async fn tap_landing(state: PortalState, uid_param: String, c: String, cmac_hex:
             return tap_generic_page();
         }
 
-        let decision = store
-            .effective_access(&uid_hex, &now)
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "effective_access failed");
-                AccessDecision::Denied("member_inactive".to_string())
-            });
+        let decision = store.effective_access(&uid_hex, &now).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "effective_access failed");
+            AccessDecision::Denied("member_inactive".to_string())
+        });
         let outcome = store
-            .record_tap(&uid_hex, counter_u64 as i64, Some("web-tap"), &now, decision.clone())
+            .record_tap(
+                &uid_hex,
+                counter_u64 as i64,
+                Some("web-tap"),
+                &now,
+                decision.clone(),
+            )
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "record_tap failed");
                 TapOutcome::Denied("member_inactive".to_string())
@@ -556,7 +565,16 @@ async fn tap_landing(state: PortalState, uid_param: String, c: String, cmac_hex:
 
     let (tag, decision, stale, shown_counter, contact) = tap_view;
     let (member_name, phone) = contact
-        .map(|(name, phone)| (if name.is_empty() { tag.member_key.clone() } else { name }, phone))
+        .map(|(name, phone)| {
+            (
+                if name.is_empty() {
+                    tag.member_key.clone()
+                } else {
+                    name
+                },
+                phone,
+            )
+        })
         .unwrap_or_else(|| (tag.member_key.clone(), None));
 
     let (status_label, status_class) = if tag.status != "active" {
@@ -582,17 +600,20 @@ async fn tap_landing(state: PortalState, uid_param: String, c: String, cmac_hex:
                 "<div id=\"tap-content\">",
             )
             .replace("__MEMBER_NAME__", &html_escape(&member_name))
+            .replace("__PHONE__", &html_escape(phone.as_deref().unwrap_or("")))
             .replace(
-                "__PHONE__",
-                &html_escape(phone.as_deref().unwrap_or("")),
+                "__PHONE_HIDDEN__",
+                if phone.is_some() { "" } else { "hidden" },
             )
-            .replace("__PHONE_HIDDEN__", if phone.is_some() { "" } else { "hidden" })
             .replace("__STATUS__", status_label)
             .replace("__STATUS_CLASS__", status_class)
             .replace("__STALE_NOTICE__", stale_notice)
             .replace("__COUNTER__", &html_escape(&shown_counter.to_string()))
             .replace("__ENROLLED__", &html_escape(&tag.enrolled_at))
-            .replace("__KEY_VERSION__", &html_escape(&tag.key_version.to_string()))
+            .replace(
+                "__KEY_VERSION__",
+                &html_escape(&tag.key_version.to_string()),
+            )
             .replace("__UID__", &html_escape(&uid_hex))
             .replace("__C__", &html_escape(&c))
             .replace("__CMAC__", &html_escape(&cmac_hex)),
@@ -620,24 +641,44 @@ async fn tap_report_lost(
     // Cards mirror UIDs uppercase; the store keeps them lowercase.
     let uid_lookup = body.uid.to_ascii_lowercase();
     let Ok(uid) = Uid::from_hex(&uid_lookup) else {
-        return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "error": "unrecognized key"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "error": "unrecognized key"})),
+        )
+            .into_response();
     };
     let Ok(tap_counter) = TapCounter::from_hex(&body.c) else {
-        return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "error": "unrecognized key"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "error": "unrecognized key"})),
+        )
+            .into_response();
     };
     let Ok(cmac) = SunCmac::from_hex(&body.cmac) else {
-        return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "error": "unrecognized key"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "error": "unrecognized key"})),
+        )
+            .into_response();
     };
     let counter_i64 = tap_counter.to_u32() as i64;
 
     let (member_key, member_name) = {
         let mut store = state.app_state.store.lock().expect("store lock poisoned");
         let Some(tag) = store.tag_by_uid(&uid_lookup).ok().flatten() else {
-            return (StatusCode::NOT_FOUND, Json(json!({"ok": false, "error": "unrecognized key"}))).into_response();
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"ok": false, "error": "unrecognized key"})),
+            )
+                .into_response();
         };
         let tag_key = diversify(&state.app_state.master, &uid);
         if verify_sun(&uid, &tap_counter, &cmac, &tag_key).is_err() {
-            return (StatusCode::NOT_FOUND, Json(json!({"ok": false, "error": "unrecognized key"}))).into_response();
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"ok": false, "error": "unrecognized key"})),
+            )
+                .into_response();
         }
         if tag.status != "active" {
             return (
@@ -655,13 +696,14 @@ async fn tap_report_lost(
                 .into_response();
         }
         let now = chrono::Utc::now().to_rfc3339();
-        let _ = store.audit_event(
+        let _ = store.audit_event_with_member(
             &now,
             Some("web-tap"),
             Some(&uid_lookup),
             Some(counter_i64),
             "denied",
             "reported_lost",
+            Some(&tag.member_key),
         );
         let name = store
             .member_contact(&tag.member_key)
@@ -1222,13 +1264,19 @@ async fn me_provision(
         };
 
         // Audit the arming event (analogous to admin arming)
-        let _ = store.audit_event(
+        tracing::info!(
+            member_key = %principal.username,
+            job_id = %job_id,
+            "provisioning job armed via self-service portal"
+        );
+        let _ = store.audit_event_with_member(
             &now,
             Some("self-service"),
             None,
             None,
             "granted",
             "self_service_provision_armed",
+            Some(&principal.username),
         );
 
         let writer_devices = store.list_writer_devices().unwrap_or_default();
@@ -1268,14 +1316,15 @@ async fn me_revoke(
 
     match store.revoke_active_tags_for_member(&principal.username) {
         Ok(revoked_uids) => {
-            for uid in &revoked_uids {
-                let _ = store.audit_event(
+            for _uid in &revoked_uids {
+                let _ = store.audit_event_with_member(
                     &now,
                     Some("self-service"),
-                    Some(uid),
+                    None,
                     None,
                     "granted",
-                    "self_service_tag_revoked",
+                    "self_service_revoked",
+                    Some(&principal.username),
                 );
             }
             (

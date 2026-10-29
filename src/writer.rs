@@ -180,17 +180,17 @@ async fn create_job(
 
     let job_id = {
         let mut store = state.store.lock().expect("store lock poisoned");
-        let role = match store.device_role(&req.device_id) {
-            Ok(Some(role)) => role,
-            Ok(None) => return error_response(StatusCode::NOT_FOUND, "unknown device"),
+        match store.device_role(&req.device_id) {
+            Ok(Some(role)) if matches!(role.as_str(), "writer" | "both") => {}
+            Ok(Some(_)) => return error_response(StatusCode::FORBIDDEN, "device is not a writer"),
+            Ok(std::option::Option::None) => {
+                return error_response(StatusCode::NOT_FOUND, "unknown device")
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "device_role lookup failed");
                 return error_response(StatusCode::INTERNAL_SERVER_ERROR, "store error");
             }
         };
-        if !matches!(role.as_str(), "writer" | "both") {
-            return error_response(StatusCode::FORBIDDEN, "device is not a writer");
-        }
         match store.create_job(
             &uid_hex,
             &req.member_key,
@@ -198,7 +198,29 @@ async fn create_job(
             &now.to_rfc3339(),
             &expires_at,
         ) {
-            Ok(id) => id,
+            Ok(id) => {
+                tracing::info!(
+                    member_key = %req.member_key,
+                    device_id = %req.device_id,
+                    job_id = %id,
+                    is_wildcard,
+                    "provisioning job armed"
+                );
+                let _ = store.audit_event_with_member(
+                    &now.to_rfc3339(),
+                    Some(&req.device_id),
+                    if uid_hex.is_empty() {
+                        None
+                    } else {
+                        Some(&uid_hex)
+                    },
+                    None,
+                    "granted",
+                    "provision_armed",
+                    Some(&req.member_key),
+                );
+                id
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "create_job failed");
                 return error_response(StatusCode::INTERNAL_SERVER_ERROR, "store error");
@@ -250,13 +272,14 @@ pub fn consume_job(
                 tracing::warn!(error = %e, "enroll_job_tag failed");
                 return ConsumeOutcome::Error("store error".to_string());
             }
-            let _ = store.audit_event(
+            let _ = store.audit_event_with_member(
                 now,
                 Some(&job.device_id),
                 Some(&job.uid),
                 Some(counter),
                 "granted",
                 "job_done",
+                Some(&job.member_key),
             );
             ConsumeOutcome::Enrolled {
                 uid: job.uid,
@@ -264,24 +287,26 @@ pub fn consume_job(
             }
         }
         Ok(JobTake::AlreadyConsumed(job)) => {
-            let _ = store.audit_event(
+            let _ = store.audit_event_with_member(
                 now,
                 Some(&job.device_id),
                 Some(&job.uid),
                 Some(counter),
                 "denied",
                 "job_reused",
+                Some(&job.member_key),
             );
             ConsumeOutcome::AlreadyConsumed
         }
         Ok(JobTake::Expired(job)) => {
-            let _ = store.audit_event(
+            let _ = store.audit_event_with_member(
                 now,
                 Some(&job.device_id),
                 Some(&job.uid),
                 Some(counter),
                 "denied",
                 "job_expired",
+                Some(&job.member_key),
             );
             ConsumeOutcome::Expired
         }

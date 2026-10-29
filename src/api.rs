@@ -54,12 +54,43 @@ fn error_response(status: StatusCode, message: &str) -> Response {
     (status, Json(json!({ "error": message }))).into_response()
 }
 
+// D2 normative deny/grant reason vocabulary (wire protocol v2):
+// unknown_tag, counter_replay, counter_saturated, expired, inactive, overridden,
+// cmac_fail, uncommissioned, policy_denied, granted.
+pub mod reasons {
+    pub const UNKNOWN_TAG: &str = "unknown_tag";
+    pub const COUNTER_REPLAY: &str = "counter_replay";
+    pub const COUNTER_SATURATED: &str = "counter_saturated";
+    pub const EXPIRED: &str = "expired";
+    pub const INACTIVE: &str = "inactive";
+    pub const OVERRIDDEN: &str = "overridden";
+    pub const CMAC_FAIL: &str = "cmac_fail";
+    pub const UNCOMMISSIONED: &str = "uncommissioned";
+    pub const POLICY_DENIED: &str = "policy_denied";
+    pub const GRANTED: &str = "granted";
+
+    pub const ALL: &[&str] = &[
+        UNKNOWN_TAG,
+        COUNTER_REPLAY,
+        COUNTER_SATURATED,
+        EXPIRED,
+        INACTIVE,
+        OVERRIDDEN,
+        CMAC_FAIL,
+        UNCOMMISSIONED,
+        POLICY_DENIED,
+        GRANTED,
+    ];
+}
+
 pub fn map_store_reason(reason: &str) -> String {
     match reason {
         "tag_inactive" | "override_ban" => "override".to_string(),
         // Wire contract for readers stays "member_inactive"; the audit log
         // carries the more precise "expired_membership".
-        "expired_membership" | "unknown_member" | "member_inactive" => "member_inactive".to_string(),
+        "expired_membership" | "unknown_member" | "member_inactive" => {
+            "member_inactive".to_string()
+        }
         known @ ("ok" | "unknown_tag" | "bad_cmac" | "counter_replay") => known.to_string(),
         other => {
             tracing::warn!(reason = other, "unmapped access reason");
@@ -119,14 +150,20 @@ async fn auth(
         } else {
             let tag_key = diversify(&state.master, &uid);
             let tap_counter = TapCounter::from_u32(req.counter as u32);
+            let member_key = store
+                .tag_by_uid(&uid_hex)
+                .ok()
+                .flatten()
+                .map(|t| t.member_key);
             if verify_sun(&uid, &tap_counter, &cmac, &tag_key).is_err() {
-                let _ = store.audit_event(
+                let _ = store.audit_event_with_member(
                     &now,
                     Some(&req.reader),
                     Some(&uid_hex),
                     Some(counter),
                     "denied",
                     "bad_cmac",
+                    member_key.as_deref(),
                 );
                 (false, "bad_cmac".to_string(), None)
             } else {

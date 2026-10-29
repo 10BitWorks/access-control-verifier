@@ -690,7 +690,13 @@ async fn test_web_tap_renders_member_and_records_counter() {
     assert!(html.contains("Report Lost Key"), "lost-key button rendered");
 
     // The web tap must advance the stored counter like a door tap.
-    let tag = f.store.lock().unwrap().tag_by_uid(TAP_UID).unwrap().unwrap();
+    let tag = f
+        .store
+        .lock()
+        .unwrap()
+        .tag_by_uid(TAP_UID)
+        .unwrap()
+        .unwrap();
     assert_eq!(tag.last_counter, 42);
 }
 
@@ -737,7 +743,13 @@ async fn test_report_lost_revokes_tag_and_is_replay_tolerant() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["ok"], true);
 
-    let tag = f.store.lock().unwrap().tag_by_uid(TAP_UID).unwrap().unwrap();
+    let tag = f
+        .store
+        .lock()
+        .unwrap()
+        .tag_by_uid(TAP_UID)
+        .unwrap()
+        .unwrap();
     assert_eq!(tag.status, "revoked");
 
     // The GET already recorded the counter; the report endpoint must accept
@@ -762,7 +774,13 @@ async fn test_report_lost_bad_cmac_rejected() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 
     // Tag must remain active.
-    let tag = f.store.lock().unwrap().tag_by_uid(TAP_UID).unwrap().unwrap();
+    let tag = f
+        .store
+        .lock()
+        .unwrap()
+        .tag_by_uid(TAP_UID)
+        .unwrap()
+        .unwrap();
     assert_eq!(tag.status, "active");
 }
 
@@ -815,7 +833,10 @@ async fn test_web_tap_accepts_uppercase_card_uid() {
     let (status, body, _) = get_request(&f.app, &uri, None).await;
     assert_eq!(status, StatusCode::OK);
     let html = body["raw"].as_str().unwrap();
-    assert!(html.contains("Alice Example"), "member rendered for uppercase UID");
+    assert!(
+        html.contains("Alice Example"),
+        "member rendered for uppercase UID"
+    );
     assert!(!html.contains("Unrecognized Key"));
 
     // Report-lost accepts the uppercase UID too.
@@ -828,6 +849,12 @@ async fn test_web_tap_accepts_uppercase_card_uid() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["ok"], true);
-    let tag = f.store.lock().unwrap().tag_by_uid(TAP_UID).unwrap().unwrap();
+    let tag = f
+        .store
+        .lock()
+        .unwrap()
+        .tag_by_uid(TAP_UID)
+        .unwrap()
+        .unwrap();
     assert_eq!(tag.status, "revoked");
 }

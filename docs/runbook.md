@@ -504,3 +504,276 @@ or causing an identity split:
 7. **Resume monitors & update configs**:
    Update monitor labels in Uptime Kuma, wiki network tables, and unpause monitors. Keep
    the legacy `keygate1` row in `devices` for historical audit integrity.
+
+### 5. Rollout Drills and Staged Activation Procedures (Tasks 15/16, S4–S6)
+
+These procedures define the operator verification steps for pre-deployment OTA probation,
+offline door fallback under degraded network conditions, the 7-day shadow canary soak,
+authoritative local-decision activation, and legacy infrastructure retirement.
+
+> **MONITOR PAUSE REMINDER**: Before executing any drill that interrupts network traffic, stops
+> the verifier container, pushes firmware images, or cycles power, pause monitors at
+> `https://uptime.10bitworks.com/metrics` (using API Key `uk1_pfrCn5jYgx6KryDGOqFWmIcEaKFGDhzZC6XdAZKM`,
+> HTTP Basic Auth with empty username).
+
+#### 5.1 OTA Probation Drill (Pre-Deployment Verification)
+
+The ESP32 firmware uses dual-slot OTA with automatic bootloader rollback (`ota_probation.rs`).
+Every new OTA image boots in pending probation with a 90-second confirmation deadline
+(`PROBATION_DEADLINE_MS = 90_000`) and a 3-attempt crash threshold (`ATTEMPT_THRESHOLD = 3`).
+If the image panics, bootloops, or fails to connect to Wi-Fi/broker, the bootloader reverts
+to the previous known-good firmware slot without manual intervention.
+
+##### A. Successful Probation Drill (Forward Deployment)
+
+- **Preconditions**:
+  - Door reader (`keygate-frontdoor`) is online and publishing heartbeats to `access/keygate-frontdoor/log`.
+  - Production image compiled at `/tmp/keygate-app.bin` with target git SHA known.
+  - Uptime monitor paused.
+- **Commands**:
+  ```bash
+  # Push firmware image to production reader with explicit production authorization
+  python3 scripts/ota-push.py /tmp/keygate-app.bin keygate-frontdoor 10.7.1.106 --prod --wait-secs 90
+  ```
+- **Observations & Evidence**:
+  - `scripts/ota-push.py` output streams chunks (512 bytes each, default 20 ms pace) and publishes `end`.
+  - In `access/keygate-frontdoor/log` or EMQX trace (`/var/log/emqx/trace_keygate1.log` on `10.7.1.106`):
+    - Device logs: `ota: erase complete`, `ota: write complete`, `ota: rebooting into new slot`.
+    - Boot banner appears within 90s: `BOOT BANNER: ... fw git:<sha>`.
+    - Confirmation marker written to flash: `ota: probation confirmed`.
+- **Pass Criteria**:
+  - Boot banner displays the target git SHA within 90 seconds.
+  - Device self-confirms before deadline: `status` word in otadata marker flips to `0x00000000` (`STATUS_CONFIRMED`).
+  - Reader publishes `keygate/v2/keygate-frontdoor/hello` and resumes normal card polling.
+- **Fail / Abort Criteria**:
+  - Script times out waiting for boot banner (>90s).
+  - Bootloop observed (>3 crashes within probation window trigger automatic fallback).
+  - Abort action: do not power cycle during chunk streaming; if node does not boot, inspect serial console via physical bench harness.
+
+##### B. Rollback Drill (Proving Automatic Fallback)
+
+- **Preconditions**:
+  - Reader running known-good image `SHA_GOOD`.
+  - Test build `SHA_BAD` (or staging build) prepared that triggers a probation rejection or fault.
+- **Commands**:
+  ```bash
+  # Push build and explicitly expect rollback to a differing SHA
+  python3 scripts/ota-push.py /tmp/keygate-bad.bin keygate-frontdoor 10.7.1.106 \
+    --prod --expect-rollback --sha <SHA_BAD_HEX> --wait-secs 120
+  ```
+- **Observations & Evidence**:
+  - Script reports provisional boot: `BOOT BANNER (pushed/provisional build): ... fw git:<SHA_BAD>`.
+  - Node fails confirmation (or hits probation deadline past 90s without self-confirm).
+  - Node reboots into previous slot: `[drill] ... rollback` or `ROLLBACK CONFIRMED (sha drift observed)`.
+  - Script exits code 0 with `ROLLBACK CONFIRMED`.
+- **Pass Criteria**:
+  - Node automatically reverts to the original slot running `SHA_GOOD`.
+  - Door reader continues authenticating cards after fallback without manual reflashing.
+- **Fail Criteria**:
+  - Node hangs indefinitely in the bad slot or fails to boot either partition (requires USB bench rescue).
+
+#### 5.2 Offline-Fallback Door Drill (Task 15, User Present, Off-Hours)
+
+This drill proves that the door reader successfully consults cached policy and actuates the
+lock relay when the verifier or MQTT broker is completely unreachable, buffers tap records
+in its write-ahead flash outbox, sounds the correct connectivity warning chirps per the
+D11 recovery ladder, and flushes the outbox cleanly upon service restoration.
+
+##### A. Preconditions
+- Schedule off-hours maintenance window; operator and user physically present at the front door.
+- User has provisioned NTAG 424 DNA fob with valid active membership.
+- Door reader has received at least one successful roster sync (`roster_gen > 0`).
+- Uptime monitors paused.
+
+##### B. Outage Simulation
+Choose ONE of the following methods to simulate a total verifier/broker outage:
+
+**Option 1: Stop Verifier Container (Tests verifier silence with live broker)**
+```bash
+ssh link-docker "cd /opt/access-control-verifier && docker compose stop verifier"
+```
+
+**Option 2: Block MQTT Traffic at Firewall / Network Layer (Tests complete broker unreachability)**
+```bash
+# On OPNsense firewall (extrawall2, 10.7.1.251) or via temporary iptables on broker host (10.7.1.106):
+ssh root@10.7.1.106 "iptables -I INPUT -p tcp --dport 1883 -s 10.7.1.0/24 -j DROP"
+```
+
+##### C. Tap Execution & Degraded Behavior Observations
+1. **Tap provisioned fob**:
+   - Present card to the reader.
+   - **Observation**: Door grants access and unlocks relay within ≤600 ms total (500 ms bounded wait for ack + local cache evaluation). Relay pulse holds for 3,000 ms (`RELAY_HOLD_MS = 3000`).
+   - LED displays green grant sequence.
+2. **Connectivity Alarms (D11 Ladder)**:
+   - If broker remains disconnected for > 120 seconds while Wi-Fi is associated, verify the audible alarm:
+     - Reader sounds the broker-down chirp (double 900 Hz tone, repeating every 60s, `BROKER_DOWN_ALARM_SECS = 120`).
+   - If Wi-Fi is lost for > 60 seconds:
+     - Reader sounds the Wi-Fi-down chirp (single 1200 Hz tone, repeating every 60s, `WIFI_DOWN_ALARM_SECS = 60`).
+   - *Note*: Chirps are silenced during the initial 5-minute post-boot grace period (`BOOT_GRACE_SECS = 300`).
+
+##### D. Service Restoration & Outbox Drain Verification
+1. **Restore service**:
+   ```bash
+   # If Option 1 was used:
+   ssh link-docker "cd /opt/access-control-verifier && docker compose start verifier"
+
+   # If Option 2 was used:
+   ssh root@10.7.1.106 "iptables -D INPUT -p tcp --dport 1883 -s 10.7.1.0/24 -j DROP"
+   ```
+2. **Verify WAL/Outbox Drain in Verifier SQLite Database**:
+   Run the exact query against the live verifier container volume to inspect buffered reports:
+   ```bash
+   ssh link-docker "docker exec -i access-control-verifier sqlite3 /data/access.db \"
+     SELECT tap_id, device_id, uid, counter, decision, reason, time_uncertain, dev_ts, recv_ts, kind
+     FROM tap_reports
+     ORDER BY recv_ts DESC
+     LIMIT 5;
+   \""
+   ```
+   **Expected Database Output**:
+   - `tap_id` appears in the format `keygate-frontdoor:<seq>`.
+   - `decision` is `'granted'`.
+   - `time_uncertain` is `1` (if tap occurred before verifier time was synchronized) or `0`.
+   - `kind` is `'report'` (flushed outbox decision).
+3. **Verify Ring Drain and MQTT Ack Correlation**:
+   - Check verifier logs for ack publishing:
+     ```bash
+     ssh link-docker "docker logs --tail 50 access-control-verifier" | grep "v2 tap/report ingested"
+     ```
+   - Trigger a non-destructive whole-ring diagnostic dump via MQTT and verify `outbox_depth` returns to 0:
+     ```bash
+     mosquitto_pub -h 10.7.1.106 -p 1883 -t "keygate/v2/keygate-frontdoor/diag/drain" -m "{}"
+     ```
+   - Monitor `keygate/v2/keygate-frontdoor/diag` for drained ring lines. Ensure no pending outbox records linger.
+4. **Pass Criteria**:
+   - Door unlocks during outage from cached policy.
+   - Offline tap records appear in `tap_reports` table within ~5 minutes of reconnection (outbox flushes ≤1 unacked record per 100 ms pump pass).
+   - Duplicate delivery does not create duplicate entries (idempotent primary key on `tap_id`).
+   - Reader chirp stops once MQTT connection is re-established.
+5. **Resume Monitors**:
+   - Unpause Uptime Kuma monitors.
+
+#### 5.3 Canary Soak Stage Gate (S4)
+
+Before flipping the reader to authoritative local decision mode, it runs in **shadow mode**
+for a mandatory observation period. In shadow mode, the device evaluates local decisions,
+logs divergences, but actuates the physical relay using the legacy `cmd` path.
+
+- **Duration**: Minimum 7 continuous days (168 hours) in production.
+- **Pass Criteria**:
+  1. **Zero Unexplained Divergences**: Compare legacy `audit_log` decisions with v2 `tap_reports`
+     across the entire soak window using this exact query:
+     ```bash
+     ssh link-docker "docker exec -i access-control-verifier sqlite3 /data/access.db \"
+       SELECT
+         a.ts AS legacy_ts,
+         r.recv_ts AS v2_ts,
+         a.uid,
+         a.decision AS legacy_decision,
+         r.decision AS v2_decision,
+         a.reason AS legacy_reason,
+         r.reason AS v2_reason
+       FROM audit_log a
+       JOIN tap_reports r ON a.uid = r.uid
+         AND ABS(strftime('%s', a.ts) - strftime('%s', r.recv_ts)) < 5
+       WHERE a.device_id = 'keygate-frontdoor'
+         AND a.decision != r.decision;
+     \""
+     ```
+     *Requirement*: Output must return 0 rows. Any divergence requires investigation before S5.
+  2. **Zero Anomalies**:
+     ```bash
+     ssh link-docker "docker exec -i access-control-verifier sqlite3 /data/access.db \"
+       SELECT * FROM anomalies WHERE device_id = 'keygate-frontdoor';
+     \""
+     ```
+     *Requirement*: Zero `counter_regression`, `seq_gap`, or `divergence` rows.
+  3. **Zero Unexplained Resets**:
+     - Check device log topic `access/keygate-frontdoor/log` or EMQX trace.
+     - Device uptime must be continuous, interrupted only by planned maintenance or scheduled Wi-Fi AP channel shifts.
+  4. **Zero Connectivity Chirps in Steady State**:
+     - Audio alarms must remain silent during normal operation.
+
+#### 5.4 Authoritative Flip Procedure (S5)
+
+Once S4 soak criteria pass, activate authoritative local decision mode. The reader will
+actuate the door relay directly from its local consult/cache evaluation rather than waiting
+for the legacy `access/{id}/cmd` pulse message.
+
+1. **Pause monitors**:
+   Pause door monitors in Uptime Kuma.
+2. **Execute Authoritative Mode Flip via Verifier Admin API**:
+   Set `offline_verify = 1` for `keygate-frontdoor` if not already set:
+   ```bash
+   curl -X POST -H "Authorization: Bearer $ADMIN_BEARER_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"device_id":"keygate-frontdoor","role":"both","offline_verify":true}' \
+     http://localhost:8000/admin/api/devices
+   ```
+3. **Trigger Sync & Authoritative Flip Handshake**:
+   Send a reboot or hello trigger to initiate the sync cycle. When the reader publishes
+   `keygate/v2/keygate-frontdoor/hello`, the verifier verifies roster generation. Upon completing
+   roster sync chunks, the verifier dispatches the authoritative flip payload to `keygate/v2/{id}/sync`:
+   ```json
+   {"authoritative": true}
+   ```
+   Alternatively, publish the flip payload directly via MQTT:
+   ```bash
+   mosquitto_pub -h 10.7.1.106 -p 1883 -u $MQTT_USERNAME -P $MQTT_PASSWORD \
+     -t "keygate/v2/keygate-frontdoor/sync" -q 1 \
+     -m '{"authoritative":true}'
+   ```
+4. **Post-Flip Verification Taps**:
+   - Perform a live physical card tap at the front door.
+   - **Latency check**: Observe relay actuation. Decision latency is ≤300 ms (identical or faster than legacy).
+   - **Audit verification**: Verify consult still occurs and row lands in `tap_reports`:
+     ```bash
+     ssh link-docker "docker exec -i access-control-verifier sqlite3 /data/access.db \"
+       SELECT tap_id, uid, decision, reason, recv_ts FROM tap_reports ORDER BY recv_ts DESC LIMIT 1;
+     \""
+     ```
+   - Verify reader log shows authoritative local actuation:
+     `blog: local actuation granted uid=<hex>`.
+5. **Immediate Rollback Path**:
+   If unexpected behavior occurs, flip the reader back to shadow mode immediately without
+   reflashing firmware:
+   ```bash
+   mosquitto_pub -h 10.7.1.106 -p 1883 -u $MQTT_USERNAME -P $MQTT_PASSWORD \
+     -t "keygate/v2/keygate-frontdoor/sync" -q 1 \
+     -m '{"authoritative":false}'
+   ```
+6. **Resume monitors**:
+   Unpause Uptime Kuma monitors.
+
+#### 5.5 Legacy Retirement Checklist (S6)
+
+After successful authoritative operation (minimum 48 hours post-S5), decommission legacy
+v1 endpoints and configuration in the following strict order:
+
+- [ ] **1. Disable Retained ACL Push Loop in Verifier**:
+  In verifier configuration, ensure `acl_push_loop` is disabled so the verifier stops broadcasting
+  retained per-tag ACL bundles to `access/{id}/acl`.
+- [ ] **2. Purge Stale Retained Broker Topics**:
+  Execute the Retained-ACL Purge procedure (Section 3 above) to clear retained ACL and presence
+  payloads from `access/keygate1/acl`, `access/keygate-frontdoor/acl`, and `access/keygate1/presence`.
+  Confirm retained messages are gone:
+  ```bash
+  mosquitto_sub -h 10.7.1.106 -p 1883 -t "access/+/acl" --retained-only -W 3
+  ```
+- [ ] **3. Retire EMQX Legacy HTTP Rule**:
+  In EMQX broker dashboard (`http://10.7.1.106:18083`) under **Integration → Rules**:
+  - Locate legacy rule forwarding `access/+/auth` to verifier `/v1/auth`.
+  - Disable and remove the rule once reader firmware no longer publishes to `access/{id}/auth`.
+  - *Note*: Verifier v2 communicates directly over rumqttc subscriptions; no HTTP rule is required.
+- [ ] **4. Decommission Stale Broker Credentials**:
+  Using `emqx-device`, remove legacy client identities that are no longer in service:
+  ```bash
+  cargo run --bin emqx-device -- --device-id keygate1 --delete
+  ```
+- [ ] **5. Update Uptime Monitor Labels & Wiki Inventory**:
+  - Confirm all monitor checks point to `keygate-frontdoor`.
+  - Update `network-inventory.md` in wiki with retirement date of legacy v1 protocol.
+- [ ] **6. Preserve Historical Database Rows**:
+  Do NOT truncate or delete historical rows in `audit_log`, `devices`, or `tags`. Maintain
+  `keygate1` entries for compliance and audit trail integrity.
+

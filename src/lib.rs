@@ -5,6 +5,7 @@ pub mod mqtt;
 pub mod portal;
 pub mod store;
 pub mod sync;
+pub mod sync_projection;
 pub mod writer;
 
 use axum::{routing::get, Router};

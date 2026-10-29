@@ -1,12 +1,7 @@
-#[path = "../src/store.rs"]
-pub mod store;
-#[path = "../src/sync.rs"]
-pub mod sync;
-
+use access_control_verifier::store::Store;
+use access_control_verifier::sync::{run_sync_cycle, SyncConfig, SyncStats};
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
-use store::Store;
-use sync::{run_sync_cycle, SyncConfig, SyncStats};
 use tempfile::NamedTempFile;
 use tokio::time::Duration;
 use wiremock::matchers::{header, method, path, query_param};

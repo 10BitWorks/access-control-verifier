@@ -2,7 +2,7 @@ use super::store::Store;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use reqwest::Client;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -193,6 +193,18 @@ async fn apply_users(store: Arc<Mutex<Store>>, users: Vec<AuthentikUser>) -> Res
                 _ => user.username.clone(),
             };
             let phone = phone_from_attributes(user.attributes.as_ref());
+
+            let old_active_until: Option<String> = tx
+                .query_row(
+                    "SELECT active_until FROM members WHERE member_key = ?1",
+                    params![user.username],
+                    |r| r.get(0),
+                )
+                .optional()
+                .context("Failed to check member active_until")?;
+
+            let active_until_changed = old_active_until.as_deref() != Some(&active_until);
+
             tx.execute(
                 "INSERT INTO members (member_key, display_name, active_until, source, phone)
                  VALUES (?1, ?2, ?3, 'authentik', ?4)
@@ -204,6 +216,28 @@ async fn apply_users(store: Arc<Mutex<Store>>, users: Vec<AuthentikUser>) -> Res
                 params![user.username, display_name, active_until, phone],
             )
             .context("Failed to upsert member")?;
+
+            if active_until_changed {
+                let mut tag_stmt = tx
+                    .prepare("SELECT uid FROM tags WHERE member_key = ?1 AND status = 'active'")
+                    .context("Failed to prepare tag query")?;
+                let tag_uids: Vec<String> = tag_stmt
+                    .query_map(params![user.username], |r| r.get(0))
+                    .context("Failed to query tags for member")?
+                    .collect::<Result<Vec<String>, _>>()
+                    .context("Failed to collect tag uids")?;
+
+                for uid in tag_uids {
+                    tx.execute(
+                        "UPDATE tags SET entry_gen = entry_gen + 1 WHERE uid = ?1",
+                        params![uid],
+                    )
+                    .context("Failed to bump tag entry_gen")?;
+                    crate::store::record_roster_event_for_tag_in_tx(&tx, &uid, &now_str)
+                        .context("Failed to record roster event for updated member")?;
+                }
+            }
+
             seen.insert(user.username.clone());
             added_or_updated += 1;
         }

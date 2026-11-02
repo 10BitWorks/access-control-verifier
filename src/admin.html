@@ -407,6 +407,44 @@
             color: var(--neutral);
         }
 
+        /* Warning action button (Override Open) -> Dark Brass / Warning */
+        .btn-warning-action {
+            background: transparent;
+            color: #A36B00;
+            border: 1px solid #C9952A;
+            padding: 4px 10px;
+            font-size: 12px;
+            min-height: auto;
+            letter-spacing: 0.04em;
+        }
+
+        .btn-warning-action:hover:not(:disabled) {
+            background: var(--primary);
+            color: var(--on-surface);
+        }
+
+        .btn-warning-confirm {
+            background: #D9822B;
+            color: #FFFFFF;
+            border: 1px solid #D9822B;
+            padding: 4px 10px;
+            font-size: 12px;
+            min-height: auto;
+            letter-spacing: 0.04em;
+            animation: pulse-border 1.5s infinite;
+        }
+
+        .btn-warning-confirm:hover:not(:disabled) {
+            background: #B86B1E;
+            border-color: #B86B1E;
+        }
+
+        @keyframes pulse-border {
+            0% { box-shadow: 0 0 0 0 rgba(217, 130, 43, 0.4); }
+            70% { box-shadow: 0 0 0 4px rgba(217, 130, 43, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(217, 130, 43, 0); }
+        }
+
         /* Tables */
         .table-wrap {
             overflow-x: auto;
@@ -612,7 +650,7 @@
             </p>
             <div class="table-wrap">
                 <table id="devices-table">
-                    <tr><th>Device ID</th><th>Role</th><th>Offline Verify</th><th>Presence</th><th>Last Seen</th></tr>
+                    <tr><th>Device ID</th><th>Role</th><th>Offline Verify</th><th>Presence</th><th>Last Seen</th><th>Action</th></tr>
                 </table>
             </div>
 
@@ -773,10 +811,21 @@
 
             api('/devices').then(devices => {
                 const tbody = document.getElementById('devices-table');
-                tbody.innerHTML = '<tr><th>Device ID</th><th>Role</th><th>Offline Verify</th><th>Presence</th><th>Last Seen</th></tr>';
+                tbody.innerHTML = '<tr><th>Device ID</th><th>Role</th><th>Offline Verify</th><th>Presence</th><th>Last Seen</th><th>Action</th></tr>';
                 devices.forEach(d => {
                     const tr = document.createElement('tr');
-                    tr.innerHTML = `<td><code>${d.device_id}</code></td><td>${d.role}</td><td>${d.offline_verify}</td><td>${d.presence}</td><td>${d.last_seen||''}</td>`;
+                    const isGate = d.role === 'gate' || d.role === 'both' || d.role === 'door';
+                    let actionHtml = '<span style="color:var(--on-surface-muted); font-size:12px;">—</span>';
+                    if (isGate) {
+                        const safeId = d.device_id.replace(/'/g, "\\'");
+                        actionHtml = `
+                            <div style="display:inline-flex; align-items:center; gap:8px;">
+                                <button type="button" class="btn-warning-action" id="btn-override-${d.device_id}" onclick="startOverrideOpen('${safeId}')">OVERRIDE OPEN</button>
+                                <span id="status-override-${d.device_id}" style="font-family:var(--font-mono); font-size:12px;"></span>
+                            </div>
+                        `;
+                    }
+                    tr.innerHTML = `<td><code>${d.device_id}</code></td><td>${d.role}</td><td>${d.offline_verify}</td><td>${d.presence}</td><td>${d.last_seen||''}</td><td>${actionHtml}</td>`;
                     tbody.appendChild(tr);
                 });
             });
@@ -834,6 +883,95 @@
                 load();
             }
         };
+
+        // --- Door Override Open (Two-Click Confirmation) --------------------
+        const overrideTimers = {};
+
+        window.startOverrideOpen = function(deviceId) {
+            const btn = document.getElementById(`btn-override-${deviceId}`);
+            const status = document.getElementById(`status-override-${deviceId}`);
+            if (!btn) return;
+
+            // If already in confirming state, clicking confirms the trigger
+            if (btn.dataset.confirming === 'true') {
+                confirmOverrideOpen(deviceId);
+                return;
+            }
+
+            // Step 1: Arm confirmation state
+            btn.dataset.confirming = 'true';
+            btn.className = 'btn-warning-confirm';
+            btn.textContent = 'CONFIRM OPEN?';
+            if (status) {
+                status.style.color = '#D9822B';
+                status.textContent = 'Arming: click again to buzz';
+            }
+
+            // Reset back to initial state after 5 seconds if not clicked
+            if (overrideTimers[deviceId]) clearTimeout(overrideTimers[deviceId]);
+            overrideTimers[deviceId] = setTimeout(() => {
+                resetOverrideButton(deviceId);
+            }, 5000);
+        };
+
+        function resetOverrideButton(deviceId) {
+            if (overrideTimers[deviceId]) {
+                clearTimeout(overrideTimers[deviceId]);
+                delete overrideTimers[deviceId];
+            }
+            const btn = document.getElementById(`btn-override-${deviceId}`);
+            const status = document.getElementById(`status-override-${deviceId}`);
+            if (btn) {
+                btn.dataset.confirming = 'false';
+                btn.className = 'btn-warning-action';
+                btn.textContent = 'OVERRIDE OPEN';
+                btn.disabled = false;
+            }
+            if (status) {
+                status.textContent = '';
+            }
+        }
+
+        async function confirmOverrideOpen(deviceId) {
+            const btn = document.getElementById(`btn-override-${deviceId}`);
+            const status = document.getElementById(`status-override-${deviceId}`);
+            if (overrideTimers[deviceId]) {
+                clearTimeout(overrideTimers[deviceId]);
+                delete overrideTimers[deviceId];
+            }
+            if (btn) {
+                btn.disabled = true;
+                btn.className = 'btn-warning-action';
+                btn.textContent = 'OPENING...';
+            }
+            if (status) {
+                status.style.color = 'var(--on-surface-muted)';
+                status.textContent = 'Publishing cmd...';
+            }
+
+            try {
+                const res = await api('/door/open', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ device_id: deviceId, pulse_ms: 3000 })
+                });
+                if (status) {
+                    status.style.color = 'var(--secondary)';
+                    status.textContent = `Unlocked (${res.pulse_ms || 3000}ms)`;
+                }
+                setTimeout(() => {
+                    resetOverrideButton(deviceId);
+                }, 3500);
+            } catch (err) {
+                if (status) {
+                    status.style.color = 'var(--tertiary)';
+                    status.textContent = `Error: ${err.message || err}`;
+                }
+                setTimeout(() => {
+                    resetOverrideButton(deviceId);
+                }, 4000);
+            }
+        }
 
         // --- Provisioning (tap-to-enroll) -----------------------------------
         let provJobId = null;

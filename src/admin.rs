@@ -21,6 +21,7 @@ pub fn router(state: AppState) -> Router {
         .route("/members", get(list_members))
         .route("/devices", get(list_devices).post(upsert_device))
         .route("/devices/{device_id}/role", post(set_device_role))
+        .route("/door/open", post(open_door))
         .route("/jobs", post(arm_job))
         .route("/jobs/pending", get(pending_jobs))
         .route("/jobs/{job_id}", delete(cancel_job))
@@ -284,6 +285,68 @@ async fn set_device_role(
 #[derive(Deserialize)]
 struct RoleSet {
     role: String,
+}
+
+#[derive(Deserialize)]
+struct OpenDoorRequest {
+    device_id: String,
+    #[serde(default = "default_open_door_pulse")]
+    pulse_ms: u32,
+}
+
+fn default_open_door_pulse() -> u32 {
+    3000
+}
+
+async fn open_door(State(state): State<AppState>, Json(req): Json<OpenDoorRequest>) -> Response {
+    if req.device_id.trim().is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": "device_id is required"})),
+        )
+            .into_response();
+    }
+
+    let pulse_ms = req.pulse_ms.clamp(500, 10000);
+
+    let device_exists = {
+        let store = state.store.lock().expect("store lock poisoned");
+        match store.device_role(&req.device_id) {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string()})),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    if !device_exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "unknown device"})),
+        )
+            .into_response();
+    }
+
+    state
+        .sink
+        .publish_cmd(&req.device_id, true, "admin_override");
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "ok",
+            "device_id": req.device_id,
+            "grant": true,
+            "reason": "admin_override",
+            "pulse_ms": pulse_ms,
+        })),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------

@@ -603,3 +603,169 @@ async fn test_anomalies_and_tap_reports_api_auth_and_filters() {
     assert!(!arr.is_empty());
     assert_eq!(arr[0]["member_key"], "member-alice");
 }
+
+// ---------------------------------------------------------------------------
+// Door Override Open
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct CapturingSink {
+    published: Mutex<Vec<(String, bool, String)>>,
+}
+
+impl access_control_verifier::api::DecisionSink for CapturingSink {
+    fn publish_cmd(&self, reader: &str, grant: bool, reason: &str) {
+        self.published
+            .lock()
+            .unwrap()
+            .push((reader.to_string(), grant, reason.to_string()));
+    }
+}
+
+struct DoorOverrideFixture {
+    app: axum::Router,
+    sink: Arc<CapturingSink>,
+    _db: NamedTempFile,
+}
+
+fn setup_door_fixture() -> DoorOverrideFixture {
+    unsafe {
+        std::env::set_var("ADMIN_BEARER_TOKEN", "test-token");
+    }
+    let db = NamedTempFile::new().expect("temp db file");
+    let mut store = Store::open(db.path()).expect("store opens");
+
+    store
+        .upsert_device("keygate-frontdoor", "gate", true)
+        .expect("upsert gate device");
+    store
+        .upsert_device("keygate-writer", "writer", false)
+        .expect("upsert writer device");
+
+    let sink = Arc::new(CapturingSink::default());
+    let store = Arc::new(Mutex::new(store));
+    let state = AppState {
+        store,
+        master: Key::from_hex(MASTER_HEX).unwrap(),
+        secret: "secret".to_string(),
+        sink: sink.clone(),
+        jobs: Arc::new(access_control_verifier::writer::NoopJobPublisher),
+    };
+
+    DoorOverrideFixture {
+        app: access_control_verifier::admin::router(state),
+        sink,
+        _db: db,
+    }
+}
+
+#[tokio::test]
+async fn test_door_open_requires_auth() {
+    let f = setup_door_fixture();
+    let (status, _) = post(
+        &f.app,
+        "/admin/api/door/open",
+        None,
+        json!({ "device_id": "keygate-frontdoor", "pulse_ms": 3000 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(f.sink.published.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_door_open_valid_admin_publishes_grant() {
+    let f = setup_door_fixture();
+    let (status, body) = post(
+        &f.app,
+        "/admin/api/door/open",
+        Some("test-token"),
+        json!({ "device_id": "keygate-frontdoor", "pulse_ms": 3000 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["device_id"], "keygate-frontdoor");
+    assert_eq!(body["grant"], true);
+    assert_eq!(body["reason"], "admin_override");
+    assert_eq!(body["pulse_ms"], 3000);
+
+    let recorded = f.sink.published.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        recorded[0],
+        (
+            "keygate-frontdoor".to_string(),
+            true,
+            "admin_override".to_string()
+        )
+    );
+}
+
+#[tokio::test]
+async fn test_door_open_clamps_pulse_ms() {
+    let f = setup_door_fixture();
+
+    // Below 500 clamped to 500
+    let (status, body) = post(
+        &f.app,
+        "/admin/api/door/open",
+        Some("test-token"),
+        json!({ "device_id": "keygate-frontdoor", "pulse_ms": 100 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["pulse_ms"], 500);
+
+    // Above 10000 clamped to 10000
+    let (status, body) = post(
+        &f.app,
+        "/admin/api/door/open",
+        Some("test-token"),
+        json!({ "device_id": "keygate-frontdoor", "pulse_ms": 50000 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["pulse_ms"], 10000);
+
+    // Default pulse_ms when omitted is 3000
+    let (status, body) = post(
+        &f.app,
+        "/admin/api/door/open",
+        Some("test-token"),
+        json!({ "device_id": "keygate-frontdoor" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["pulse_ms"], 3000);
+}
+
+#[tokio::test]
+async fn test_door_open_unknown_device_returns_404() {
+    let f = setup_door_fixture();
+    let (status, body) = post(
+        &f.app,
+        "/admin/api/door/open",
+        Some("test-token"),
+        json!({ "device_id": "nonexistent-door", "pulse_ms": 3000 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "unknown device");
+    assert!(f.sink.published.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_door_open_empty_device_id_returns_422() {
+    let f = setup_door_fixture();
+    let (status, body) = post(
+        &f.app,
+        "/admin/api/door/open",
+        Some("test-token"),
+        json!({ "device_id": "   ", "pulse_ms": 3000 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"], "device_id is required");
+    assert!(f.sink.published.lock().unwrap().is_empty());
+}

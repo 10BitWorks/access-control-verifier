@@ -759,3 +759,165 @@ v1 endpoints and configuration in the following strict order:
   Do NOT truncate or delete historical rows in `audit_log`, `devices`, or `tags`. Maintain
   `keygate1` entries for compliance and audit trail integrity.
 
+### 6. S2: Enable Broker Authentication and Per-Principal Authorization
+
+Stage S2 transitions the keygate EMQX broker (`10.7.1.106`) from open access to enforced client authentication and per-principal topic isolation.
+
+**Motivation**: Prior to S2, EMQX authentication is disabled. Probing with anonymous clients and arbitrary credentials confirmed that unauthenticated clients can connect, subscribe to door topics, and publish unauthorized commands or OTA payloads. S2 strictly binds client identities and enforces ACLs.
+
+> **MONITOR PAUSE REMINDER**: Before performing the S2 rollout, pause the uptime monitors
+> for the verifier and door reader (`keygate-frontdoor`) at `https://uptime.10bitworks.com/metrics`
+> (using API Key `uk1_pfrCn5jYgx6KryDGOqFWmIcEaKFGDhzZC6XdAZKM`, HTTP Basic Auth with empty username).
+
+#### 6.1 Preconditions
+
+1. **Broker Credentials Seeded**:
+   Principal credentials and ACL rules are provisioned on EMQX (`10.7.1.106`) and recorded at `/root/keygate-emqx-ops.env` on `10.7.1.106` for:
+   - `verifier` service principal
+   - `keygate-frontdoor` door reader principal
+   - `keygate-ops` operations/admin principal
+2. **Door Reader Firmware Embedded Credentials**:
+   `keygate-frontdoor` is running v2 firmware (commit `61274f7` or later) with embedded MQTT credentials in the binary, built via the identity build procedure.
+3. **Verifier Environment Configuration**:
+   The verifier service reads `MQTT_USERNAME` and `MQTT_PASSWORD` from its environment (`src/mqtt.rs:60-65`), which `MqttConfig::to_options` supplies to `rumqttc::MqttOptions::set_credentials` (`src/mqtt.rs:78-80`). Ensure `/opt/access-control-verifier/.env` on `link-docker` (`10.7.1.25`) defines:
+   ```bash
+   MQTT_USERNAME=verifier
+   MQTT_PASSWORD=<verifier_password_from_ops_file>
+   ```
+4. **EMQX REST API Key**:
+   API key `keygate-ops` is provisioned for REST API access.
+   > **PORT NOTE**: The EMQX REST API binds port **80** on this deployment (`http://10.7.1.106`), NOT the default `18083`. Basic auth username is the API key value, and password is the API secret.
+   ```bash
+   export EMQX_BASE="http://10.7.1.106"
+   export EMQX_API_KEY="<api_key_value>"
+   export EMQX_API_SECRET="<api_secret_value>"
+   ```
+
+#### 6.2 Pause Uptime Monitors
+
+Pause the checks in Uptime Kuma to avoid false alarms during reconnects:
+- `keygate-frontdoor` (door reader presence)
+- `access-control-verifier` (`/healthz` endpoint)
+
+#### 6.3 The Flip: Enable Authn & Enforce ACLs
+
+Execute the following steps sequentially on `10.7.1.106` (or via SSH as root):
+
+1. **Verify Authenticator State via REST (GET-first check)**:
+   Inspect the current status of the built-in database authenticator:
+   ```bash
+   curl -s -u "$EMQX_API_KEY:$EMQX_API_SECRET" \
+     "${EMQX_BASE}/api/v5/authentication/password_based%3Abuilt_in_database" | jq .
+   ```
+   Confirm `enable` is currently `false` (dormant).
+
+2. **Enable Built-in Database Authentication**:
+   Enable the password-based authenticator:
+   ```bash
+   curl -s -X PUT -u "$EMQX_API_KEY:$EMQX_API_SECRET" \
+     -H "Content-Type: application/json" \
+     -d '{"enable": true}' \
+     "${EMQX_BASE}/api/v5/authentication/password_based%3Abuilt_in_database" | jq .
+   ```
+   > **Bench Verification Note**: Verify on the bench first that the PUT payload `{"enable": true}` succeeds on EMQX 6.2.0. If EMQX requires the full configuration object, merge the GET response with `"enable": true`.
+
+3. **Backup and Restrict `/etc/emqx/acl.conf`**:
+   The file-based authorization source evaluates before Mnesia built-in DB rules. Remove the `{allow, all}` catch-all to allow the user-specific ACL rules to govern.
+   ```bash
+   # Create backup
+   cp -p /etc/emqx/acl.conf /etc/emqx/acl.conf.bak-pre-s2
+
+   # Inspect existing rules: retain $SYS deny rules and comment out or remove {allow, all}
+   sed -i 's/^[[:space:]]*{[[:space:]]*allow[[:space:]]*,[[:space:]]*all[[:space:]]*}\./%% S2 flip: {allow, all} disabled\n{deny, all}./' /etc/emqx/acl.conf
+   ```
+
+4. **Reload ACL Rules**:
+   Reload authorization rules:
+   ```bash
+   emqx ctl acl reload
+   ```
+   > **Bench Verification Note**: Verify on the bench first that `emqx ctl acl reload` syntax is valid on EMQX 6.2.0 (alternative: `emqx_ctl acl reload`).
+
+#### 6.4 Verification Ladder
+
+Verify each rung of the ladder before declaring the flip successful:
+
+##### Rung A: Anonymous / Invalid Probes Rejected
+Attempt anonymous connection and verify connection failure:
+```bash
+# Must fail with NOT_AUTHORIZED (rc = 5 or connect error)
+mosquitto_sub -h 10.7.1.106 -p 1883 -t "access/+/log" -W 5
+# Expected output: Connection error / Not authorized (CONNACK rc 4 or 5)
+```
+Attempt connection with fake credentials:
+```bash
+mosquitto_sub -h 10.7.1.106 -p 1883 -u "fakeuser" -P "fakepass" -t "access/+/log" -W 5
+# Expected output: Connection refused: Not authorized
+```
+Attempt valid ops connection:
+```bash
+mosquitto_sub -h 10.7.1.106 -p 1883 -u "keygate-ops" -P "<ops_password>" -t "keygate/v2/+/hello" -W 5
+# Expected output: Successfully subscribes without error
+```
+
+##### Rung B: Door Reconnects and Hellos Resume
+Within ~60 seconds (door retry cadence), the door reader associates with embedded credentials:
+```bash
+mosquitto_sub -h 10.7.1.106 -p 1883 -u "keygate-ops" -P "<ops_password>" -t "keygate/v2/keygate-frontdoor/hello" -C 1
+```
+**Expected output**: Hello JSON containing `git_sha`, `roster_gen`, and `key_versions: [1]`.
+
+##### Rung C: Verifier Reconnects & Ingests Events
+Check verifier container status and logs on `10.7.1.25`:
+```bash
+ssh link-docker "cd /opt/access-control-verifier && docker compose restart verifier"
+ssh link-docker "docker logs --tail 50 -f access-control-verifier"
+```
+**Expected output**:
+- Log indicates successful MQTT connection to `10.7.1.106:1883`.
+- Ingestion of door presence: `presence online reader=keygate-frontdoor`.
+- Ingestion of hello: `v2 hello processed device=keygate-frontdoor`.
+
+##### Rung D: Supervised Physical Tap
+Perform one live physical tap with a provisioned member fob at the front door.
+**Expected output**:
+- Relay energizes (≤300 ms grant latency).
+- Verifier logs report `v2 tap/report ingested`.
+- Admin UI (`/admin`) Tap Reports feed displays a new `granted` tap record.
+
+#### 6.5 Rollback Procedure
+
+If any verification step fails, execute immediate rollback:
+
+1. **Restore File ACL Catch-All**:
+   ```bash
+   cp /etc/emqx/acl.conf.bak-pre-s2 /etc/emqx/acl.conf
+   emqx ctl acl reload
+   ```
+2. **Disable Built-in Database Authentication**:
+   ```bash
+   curl -s -X PUT -u "$EMQX_API_KEY:$EMQX_API_SECRET" \
+     -H "Content-Type: application/json" \
+     -d '{"enable": false}' \
+     "${EMQX_BASE}/api/v5/authentication/password_based%3Abuilt_in_database"
+   ```
+3. **Verify Reconnect**:
+   Verify anonymous `mosquitto_sub` succeeds again and readers reconnect. Restart the verifier container if needed (`docker compose restart verifier`).
+
+#### 6.6 Post-S2 Operations
+
+All administrative tools and scripts connecting over MQTT now require credentials:
+- **OTA Pushes**: Future firmware pushes via `ota-push.py` must provide ops credentials:
+  ```bash
+  python3 scripts/ota-push.py <image.bin> keygate-frontdoor 10.7.1.106 --prod \
+    --user keygate-ops --pass <password_from_ops_file>
+  ```
+  Or export environment variables:
+  ```bash
+  export MQTT_USERNAME=keygate-ops
+  export MQTT_PASSWORD=<password_from_ops_file>
+  python3 scripts/ota-push.py <image.bin> keygate-frontdoor 10.7.1.106 --prod
+  ```
+- **Unpause Monitors**: Unpause Uptime Kuma monitors once verification completes.
+
+

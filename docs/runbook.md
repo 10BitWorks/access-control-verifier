@@ -803,13 +803,26 @@ Pause the checks in Uptime Kuma to avoid false alarms during reconnects:
 
 Execute the following steps sequentially on `10.7.1.106` (or via SSH as root):
 
-1. **Verify Authenticator State via REST (GET-first check)**:
+1. **Verify Authenticator State & Authorization Chain via REST (GET-first check)**:
    Inspect the current status of the built-in database authenticator:
    ```bash
    curl -s -u "$EMQX_API_KEY:$EMQX_API_SECRET" \
      "${EMQX_BASE}/api/v5/authentication/password_based%3Abuilt_in_database" | jq .
    ```
    Confirm `enable` is currently `false` (dormant).
+
+   Re-confirm the authorization source ordering and default action:
+   ```bash
+   curl -s -u "$EMQX_API_KEY:$EMQX_API_SECRET" \
+     "${EMQX_BASE}/api/v5/authorization/sources" | jq .
+   curl -s -u "$EMQX_API_KEY:$EMQX_API_SECRET" \
+     "${EMQX_BASE}/api/v5/authorization/settings" | jq .
+   ```
+   > **Confirmed Broker Topology (EMQX 6.2.0)**:
+   > - Sources chain: `built_in_database` FIRST (`type: "built_in_database"`), `file` SECOND (`type: "file"`). Per-principal rules are consulted before the file source.
+   > - Global settings: `no_match: "deny"`, `deny_action: "ignore"`.
+   >
+   > Because `built_in_database` is evaluated first and fallback is `deny`, replacing `{allow, all}` with `{deny, all}` in the file source is completely SOUND: authenticated principals hit their DB rules first; unauthenticated or unpermitted actions fall through to the file source's `{deny, all}`; and any non-match ends in `deny`. Always re-confirm on the day with the GET check above in case of configuration drift.
 
 2. **Enable Built-in Database Authentication**:
    Enable the password-based authenticator:
@@ -819,24 +832,48 @@ Execute the following steps sequentially on `10.7.1.106` (or via SSH as root):
      -d '{"enable": true}' \
      "${EMQX_BASE}/api/v5/authentication/password_based%3Abuilt_in_database" | jq .
    ```
-   > **Bench Verification Note**: Verify on the bench first that the PUT payload `{"enable": true}` succeeds on EMQX 6.2.0. If EMQX requires the full configuration object, merge the GET response with `"enable": true`.
+   > **Note**: If the PUT requires the full configuration object on your EMQX build, merge the GET response with `"enable": true`.
 
-3. **Backup and Restrict `/etc/emqx/acl.conf`**:
-   The file-based authorization source evaluates before Mnesia built-in DB rules. Remove the `{allow, all}` catch-all to allow the user-specific ACL rules to govern.
+3. **Backup `/etc/emqx/acl.conf` for Rollback Reference**:
+   Keep a local disk backup of the pre-S2 configuration:
    ```bash
-   # Create backup
+   # Create backup on broker host
    cp -p /etc/emqx/acl.conf /etc/emqx/acl.conf.bak-pre-s2
-
-   # Inspect existing rules: retain $SYS deny rules and comment out or remove {allow, all}
-   sed -i 's/^[[:space:]]*{[[:space:]]*allow[[:space:]]*,[[:space:]]*all[[:space:]]*}\./%% S2 flip: {allow, all} disabled\n{deny, all}./' /etc/emqx/acl.conf
    ```
+   *Note*: On EMQX 6.2, editing `/etc/emqx/acl.conf` on disk alone was NOT observed to hot-reload authorization rules into runtime memory. The REST API manages the file authorization source authoritatively.
 
-4. **Reload ACL Rules**:
-   Reload authorization rules:
+4. **Update File Authorization Rules via REST (Primary Mechanism)**:
+   Fetch current file source rules, inspect the payload, and PUT the updated rule string (disabling `{allow, all}` and enforcing `{deny, all}`):
    ```bash
-   emqx ctl acl reload
+   # Inspect current live rules
+   curl -s -u "$EMQX_API_KEY:$EMQX_API_SECRET" \
+     "${EMQX_BASE}/api/v5/authorization/sources/file" | jq .
+
+   # Update file source rules via REST PUT (replaces allow-all with deny-all)
+   # Retain standard $SYS deny rules while changing {allow, all} to {deny, all}
+   cat << 'EOF' > /tmp/s2_file_rules.json
+   {
+     "enable": true,
+     "rules": "{deny, all, subscribe, [\"$SYS/#\"]}.\n{deny, all, publish, [\"$SYS/#\"]}.\n%% S2 flip: default allow disabled; built_in_database rules govern principals\n{deny, all}."
+   }
+   EOF
+
+   curl -s -X PUT -u "$EMQX_API_KEY:$EMQX_API_SECRET" \
+     -H "Content-Type: application/json" \
+     -d @/tmp/s2_file_rules.json \
+     "${EMQX_BASE}/api/v5/authorization/sources/file" | jq .
+
+   # Read-back verification to confirm rules are live
+   curl -s -u "$EMQX_API_KEY:$EMQX_API_SECRET" \
+     "${EMQX_BASE}/api/v5/authorization/sources/file" | jq -r .rules
    ```
-   > **Bench Verification Note**: Verify on the bench first that `emqx ctl acl reload` syntax is valid on EMQX 6.2.0 (alternative: `emqx_ctl acl reload`).
+
+   > **Command Note (`emqx ctl acl reload` DOES NOT EXIST)**:
+   > `emqx ctl acl reload` does NOT exist in EMQX 6.2 (falls through to generic CLI usage). The REST PUT above is the authoritative reload mechanism.
+   >
+   > **Fallbacks**: If the REST PUT encounters schema/validation errors:
+   > 1. CLI config reload: edit `/etc/emqx/acl.conf` and run `emqx ctl conf reload --replace` (valid in 6.2; reloads node configuration).
+   > 2. Broker restart (last resort): `systemctl restart emqx` (brief broker blip; readers fall back to local offline verification during the restart window, which is acceptable off-hours).
 
 #### 6.4 Verification Ladder
 
@@ -889,17 +926,30 @@ Perform one live physical tap with a provisioned member fob at the front door.
 
 If any verification step fails, execute immediate rollback:
 
-1. **Restore File ACL Catch-All**:
+1. **Restore File ACL Catch-All via REST**:
+   Restore the file source rules via REST PUT (or restore `/etc/emqx/acl.conf.bak-pre-s2` and run `emqx ctl conf reload --replace`):
    ```bash
+   cat << 'EOF' > /tmp/s2_file_rules_rollback.json
+   {
+     "enable": true,
+     "rules": "{deny, all, subscribe, [\"$SYS/#\"]}.\n{deny, all, publish, [\"$SYS/#\"]}.\n{allow, all}."
+   }
+   EOF
+
+   curl -s -X PUT -u "$EMQX_API_KEY:$EMQX_API_SECRET" \
+     -H "Content-Type: application/json" \
+     -d @/tmp/s2_file_rules_rollback.json \
+     "${EMQX_BASE}/api/v5/authorization/sources/file" | jq .
+
+   # Restore backup file on disk
    cp /etc/emqx/acl.conf.bak-pre-s2 /etc/emqx/acl.conf
-   emqx ctl acl reload
    ```
 2. **Disable Built-in Database Authentication**:
    ```bash
    curl -s -X PUT -u "$EMQX_API_KEY:$EMQX_API_SECRET" \
      -H "Content-Type: application/json" \
      -d '{"enable": false}' \
-     "${EMQX_BASE}/api/v5/authentication/password_based%3Abuilt_in_database"
+     "${EMQX_BASE}/api/v5/authentication/password_based%3Abuilt_in_database" | jq .
    ```
 3. **Verify Reconnect**:
    Verify anonymous `mosquitto_sub` succeeds again and readers reconnect. Restart the verifier container if needed (`docker compose restart verifier`).

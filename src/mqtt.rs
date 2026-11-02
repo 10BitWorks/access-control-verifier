@@ -883,18 +883,33 @@ fn process_v2_tap_or_report(
         kind: kind_str,
     };
 
-    let ingest_outcome = match store_guard.ingest_tap_report(&report_input) {
-        Ok(out) => out,
-        Err(e) => {
-            tracing::warn!(error = %e, device, tap_id = %tap.tap_id, "ingest_tap_report failed");
-            return None;
+    let ingest_res = store_guard.ingest_tap_report(&report_input);
+    if let Err(ref e) = ingest_res {
+        tracing::warn!(error = %e, device, tap_id = %tap.tap_id, "ingest_tap_report failed");
+        if let Err(anom_err) = store_guard.record_anomaly(
+            now_rfc3339,
+            Some(device),
+            Some(uid_hex),
+            "report_rejected",
+            Some(&format!("tap_id={}; error={}", tap.tap_id, e)),
+        ) {
+            tracing::warn!(error = %anom_err, device, tap_id = %tap.tap_id, "failed to record report_rejected anomaly");
         }
-    };
-
-    // If event == Report, audit-only (never publishes ack)
-    if event != V2Event::Tap {
-        return None;
     }
+
+    // Reports always ack with empty entry and floor=0 to advance device outbox WAL.
+    // Taps (consults) calculate entry + counter_floor and ack.
+    if event == V2Event::Report {
+        return Some(TapProcessResult {
+            entry: None,
+            counter_floor: 0,
+        });
+    }
+
+    let ingest_outcome = match ingest_res {
+        Ok(out) => out,
+        Err(_) => return None,
+    };
 
     let (entry, counter_floor) = match ingest_outcome {
         IngestReportOutcome::Duplicate(stored) => {

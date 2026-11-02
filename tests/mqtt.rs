@@ -1437,3 +1437,235 @@ async fn v2_hello_delta_sync_publishes_deltas() {
     spawned.presence_task.abort();
     spawned.acl_task.abort();
 }
+
+#[tokio::test]
+async fn v2_report_success_publishes_ack_with_null_entry_and_zero_floor() {
+    let broker = start_broker();
+    let (store, _db) = build_store("door1", 1);
+    let master = Key::from_hex(MASTER_HEX).expect("master key");
+
+    let spawned = spawn(
+        &MqttConfig {
+            host: "127.0.0.1".to_string(),
+            port: broker.port,
+            tls: false,
+            username: None,
+            password: None,
+            client_id: "verifier-v2-report-success".to_string(),
+        },
+        Arc::clone(&store),
+        master.clone(),
+    );
+
+    let (client, mut eventloop) = AsyncClient::new(client_options(broker.port, "report-dev-1"), 8);
+    client
+        .subscribe("keygate/v2/door1/ack", QoS::AtLeastOnce)
+        .await
+        .expect("subscribe ack");
+    wait_for_suback(&mut eventloop).await;
+
+    let cmac_hex = compute_test_cmac(&master, UID_ACTIVE, 42);
+    let report_payload = json!({
+        "tap_id": "door1:42",
+        "uid": UID_ACTIVE,
+        "counter": 42,
+        "cmac": cmac_hex,
+        "decision": "granted",
+        "reason": "granted",
+        "key_version": 1,
+    });
+
+    let (topic, ack) = publish_tap_until_ack(
+        &client,
+        &mut eventloop,
+        "keygate/v2/door1/report",
+        &report_payload,
+        Duration::from_secs(5),
+    )
+    .await;
+
+    assert_eq!(topic, "keygate/v2/door1/ack");
+    assert_eq!(ack["tap_id"], "door1:42");
+    assert_eq!(ack["entry"], Value::Null);
+    assert_eq!(ack["counter_floor"], 0);
+    assert!(ack["time_s"].as_u64().unwrap() > 0);
+
+    // Verify row was ingested into tap_reports
+    let s = store.lock().unwrap();
+    let rep = s
+        .tap_report_by_id("door1:42")
+        .unwrap()
+        .expect("report ingested");
+    assert_eq!(rep.decision.as_deref(), Some("granted"));
+    assert_eq!(rep.reason.as_deref(), Some("granted"));
+    assert_eq!(rep.kind, "report");
+
+    spawned.presence_task.abort();
+    spawned.acl_task.abort();
+}
+
+#[tokio::test]
+async fn v2_report_duplicate_publishes_ack_and_leaves_existing_row() {
+    let broker = start_broker();
+    let (store, _db) = build_store("door1", 1);
+    let master = Key::from_hex(MASTER_HEX).expect("master key");
+
+    let spawned = spawn(
+        &MqttConfig {
+            host: "127.0.0.1".to_string(),
+            port: broker.port,
+            tls: false,
+            username: None,
+            password: None,
+            client_id: "verifier-v2-report-dup".to_string(),
+        },
+        Arc::clone(&store),
+        master.clone(),
+    );
+
+    let (client, mut eventloop) = AsyncClient::new(client_options(broker.port, "report-dev-2"), 8);
+    client
+        .subscribe("keygate/v2/door1/ack", QoS::AtLeastOnce)
+        .await
+        .expect("subscribe ack");
+    wait_for_suback(&mut eventloop).await;
+
+    let cmac_hex = compute_test_cmac(&master, UID_ACTIVE, 43);
+    let report_payload = json!({
+        "tap_id": "door1:43",
+        "uid": UID_ACTIVE,
+        "counter": 43,
+        "cmac": cmac_hex,
+        "decision": "granted",
+        "reason": "granted",
+        "key_version": 1,
+    });
+
+    // 1st publish
+    let (_, ack1) = publish_tap_until_ack(
+        &client,
+        &mut eventloop,
+        "keygate/v2/door1/report",
+        &report_payload,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(ack1["tap_id"], "door1:43");
+    assert_eq!(ack1["entry"], Value::Null);
+    assert_eq!(ack1["counter_floor"], 0);
+
+    // 2nd publish (duplicate)
+    let (_, ack2) = publish_tap_until_ack(
+        &client,
+        &mut eventloop,
+        "keygate/v2/door1/report",
+        &report_payload,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(ack2["tap_id"], "door1:43");
+    assert_eq!(ack2["entry"], Value::Null);
+    assert_eq!(ack2["counter_floor"], 0);
+
+    // Verify exactly one row in tap_reports
+    let mut s = store.lock().unwrap();
+    let count: i64 = s
+        .conn_mut()
+        .query_row(
+            "SELECT COUNT(*) FROM tap_reports WHERE tap_id = 'door1:43'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "exactly one report row despite duplicate");
+
+    spawned.presence_task.abort();
+    spawned.acl_task.abort();
+}
+
+#[tokio::test]
+async fn v2_report_ingest_error_records_anomaly_and_still_publishes_ack() {
+    let broker = start_broker();
+    let (store, _db) = build_store("door1", 1);
+    let master = Key::from_hex(MASTER_HEX).expect("master key");
+
+    // Intentionally create a schema/trigger conflict on tap_reports to trigger an ingest error
+    {
+        let mut s = store.lock().unwrap();
+        s.conn_mut()
+            .execute_batch(
+                "CREATE TRIGGER fail_tap_report_insert
+                 BEFORE INSERT ON tap_reports
+                 WHEN NEW.tap_id = 'door1:poison'
+                 BEGIN
+                     SELECT RAISE(FAIL, 'simulated ingest failure');
+                 END;",
+            )
+            .unwrap();
+    }
+
+    let spawned = spawn(
+        &MqttConfig {
+            host: "127.0.0.1".to_string(),
+            port: broker.port,
+            tls: false,
+            username: None,
+            password: None,
+            client_id: "verifier-v2-report-err".to_string(),
+        },
+        Arc::clone(&store),
+        master.clone(),
+    );
+
+    let (client, mut eventloop) = AsyncClient::new(client_options(broker.port, "report-dev-3"), 8);
+    client
+        .subscribe("keygate/v2/door1/ack", QoS::AtLeastOnce)
+        .await
+        .expect("subscribe ack");
+    wait_for_suback(&mut eventloop).await;
+
+    let cmac_hex = compute_test_cmac(&master, UID_ACTIVE, 99);
+    let poison_payload = json!({
+        "tap_id": "door1:poison",
+        "uid": UID_ACTIVE,
+        "counter": 99,
+        "cmac": cmac_hex,
+        "decision": "granted",
+        "reason": "granted",
+        "key_version": 1,
+    });
+
+    let (topic, ack) = publish_tap_until_ack(
+        &client,
+        &mut eventloop,
+        "keygate/v2/door1/report",
+        &poison_payload,
+        Duration::from_secs(5),
+    )
+    .await;
+
+    assert_eq!(topic, "keygate/v2/door1/ack");
+    assert_eq!(ack["tap_id"], "door1:poison");
+    assert_eq!(ack["entry"], Value::Null);
+    assert_eq!(ack["counter_floor"], 0);
+    assert!(ack["time_s"].as_u64().unwrap() > 0);
+
+    // Verify anomaly row was recorded
+    let s = store.lock().unwrap();
+    let anomalies = s.list_anomalies().unwrap();
+    let rejected: Vec<_> = anomalies
+        .into_iter()
+        .filter(|a| a.kind == "report_rejected")
+        .collect();
+    assert_eq!(rejected.len(), 1, "report_rejected anomaly recorded");
+    assert_eq!(rejected[0].device_id.as_deref(), Some("door1"));
+    assert_eq!(rejected[0].uid.as_deref(), Some(UID_ACTIVE));
+    assert!(rejected[0]
+        .detail
+        .as_deref()
+        .unwrap()
+        .contains("simulated ingest failure"));
+
+    spawned.presence_task.abort();
+    spawned.acl_task.abort();
+}

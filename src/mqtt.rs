@@ -1,12 +1,10 @@
-//! MQTT integration: decision `cmd` publish, device presence watch, and retained
-//! ACL+key distribution for offline-verifying readers.
+//! MQTT integration: decision `cmd` publish, device presence watch, and v2
+//! offline-first sync/commission/ack exchange.
 //!
-//! # Accepted risk
-//! Devices with `offline_verify=1` receive diversified per-tag keys in the
-//! retained `access/{reader}/acl` payload so they can verify SUN CMACs locally
-//! when the broker or verifier is unreachable (fail-safe door operation).
-//! Physical custody of such a reader therefore implies custody of the tag keys
-//! it holds; readers without `offline_verify` never receive key material.
+//! Legacy retained `access/{reader}/acl` distribution has been retired to
+//! prevent per-tag key exposure on the broker. Offline verification is handled
+//! via v2 sync chunks (`keygate/v2/{device}/sync`) and master-key commissioning
+//! (`keygate/v2/{device}/commission`).
 
 use crate::api::{reasons, DecisionSink};
 use crate::crypto::{diversify, verify_sun, Key, SunCmac, TapCounter, Uid};
@@ -32,6 +30,7 @@ const CHANNEL_CAP: usize = 64;
 const RECONNECT_DELAY: StdDuration = StdDuration::from_secs(1);
 const KEEP_ALIVE: StdDuration = StdDuration::from_secs(30);
 const DEFAULT_ACL_EXPIRY_DAYS: i64 = 35;
+#[allow(dead_code)]
 const DEFAULT_PUSH_PERIOD_MINUTES: u64 = 60;
 const TS_FORMAT: &str = "%Y-%m-%dT%H:%M:%SZ";
 
@@ -1042,43 +1041,23 @@ async fn handle_v2_tap_or_report(
     }
 }
 
-pub async fn acl_push_loop(client: AsyncClient, store: Arc<Mutex<Store>>, master: Key) {
-    loop {
-        if let Err(e) = push_acls(&client, &store, &master).await {
-            tracing::warn!(error = %e, "acl push failed");
-        }
-        let minutes = store
-            .lock()
-            .ok()
-            .and_then(|s| s.get_config("acl_push_period_minutes").ok().flatten())
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(DEFAULT_PUSH_PERIOD_MINUTES)
-            .max(1);
-        tokio::time::sleep(StdDuration::from_secs(minutes * 60)).await;
-    }
+// Legacy retained ACL push loop has been retired to eliminate exposure of
+// diversified per-tag SUN keys on the MQTT broker.
+// v2 readers verify offline using binary sync chunks and commissioned master keys.
+pub async fn acl_push_loop(_client: AsyncClient, _store: Arc<Mutex<Store>>, _master: Key) {
+    // Permanently disabled: loop sleeps indefinitely without publishing.
+    // Preserved for task signature compatibility with Spawned struct.
+    core::future::pending::<()>().await;
 }
 
+/// Legacy retained ACL push has been retired. This function is a no-op that
+/// returns Ok(0) and publishes nothing to `access/{device}/acl`.
 pub async fn push_acls(
-    client: &AsyncClient,
-    store: &Arc<Mutex<Store>>,
-    master: &Key,
+    _client: &AsyncClient,
+    _store: &Arc<Mutex<Store>>,
+    _master: &Key,
 ) -> anyhow::Result<usize> {
-    let payload = {
-        let store = store.lock().expect("store lock poisoned");
-        build_acl(&store, master, Utc::now())?
-    };
-    let devices = {
-        let store = store.lock().expect("store lock poisoned");
-        store.acl_devices()?
-    };
-    let body = payload.to_string();
-    for device in &devices {
-        let topic = format!("access/{device}/acl");
-        client
-            .publish(topic, QoS::AtLeastOnce, true, body.clone())
-            .await?;
-    }
-    Ok(devices.len())
+    Ok(0)
 }
 
 pub fn build_acl(store: &Store, master: &Key, now: DateTime<Utc>) -> anyhow::Result<Value> {

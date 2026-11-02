@@ -1,4 +1,4 @@
-use access_control_verifier::crypto::{diversify, Key, Uid};
+use access_control_verifier::crypto::{Key, Uid};
 use access_control_verifier::mqtt::{build_acl, push_acls, spawn, MqttConfig, MqttSink};
 use access_control_verifier::store::Store;
 use rumqttc::{AsyncClient, Event, EventLoop, Incoming, MqttOptions, QoS};
@@ -122,6 +122,7 @@ async fn wait_for_publish(eventloop: &mut EventLoop, timeout: Duration) -> Optio
     }
 }
 
+#[allow(dead_code)]
 fn parse_publish(incoming: Incoming) -> (String, Value) {
     let Incoming::Publish(publish) = incoming else {
         panic!("expected publish");
@@ -131,7 +132,7 @@ fn parse_publish(incoming: Incoming) -> (String, Value) {
 }
 
 #[tokio::test]
-async fn retained_acl_reaches_offline_device_on_subscribe() {
+async fn legacy_retained_acl_is_never_published_even_for_offline_verify_device() {
     let broker = start_broker();
     let (store, _db) = build_store("door1", 1);
     let master = Key::from_hex(MASTER_HEX).expect("master key");
@@ -149,7 +150,7 @@ async fn retained_acl_reaches_offline_device_on_subscribe() {
         master.clone(),
     );
 
-    // Push once explicitly so the test does not race the initial loop push.
+    // Call push_acls explicitly: must be a no-op returning Ok(0).
     let pushed = {
         let (client, mut eventloop) =
             AsyncClient::new(client_options(broker.port, "acl-pusher"), 8);
@@ -161,46 +162,41 @@ async fn retained_acl_reaches_offline_device_on_subscribe() {
             }
         });
         let count = push_acls(&client, &store, &master).await.expect("push acl");
-        // Give QoS1 publishes time to be acknowledged before tearing down.
         tokio::time::sleep(Duration::from_millis(300)).await;
         handle.abort();
         count
     };
-    assert_eq!(pushed, 1, "one offline_verify device receives the ACL");
+    assert_eq!(
+        pushed, 0,
+        "legacy push_acls must return 0 and publish nothing"
+    );
 
+    // Subscribing to access/door1/acl or wildcard access/+/acl must receive zero messages.
     let (sub_client, mut sub_eventloop) =
         AsyncClient::new(client_options(broker.port, "acl-sub"), 8);
     sub_client
         .subscribe("access/door1/acl", QoS::AtLeastOnce)
         .await
         .expect("subscribe");
-    let incoming = wait_for_publish(&mut sub_eventloop, Duration::from_secs(5))
+    sub_client
+        .subscribe("access/+/acl", QoS::AtLeastOnce)
         .await
-        .expect("retained ACL arrives on subscribe");
-    let (topic, payload) = parse_publish(incoming);
-    assert_eq!(topic, "access/door1/acl");
+        .expect("subscribe wildcard");
 
+    let incoming = wait_for_publish(&mut sub_eventloop, Duration::from_secs(2)).await;
+    assert!(
+        incoming.is_none(),
+        "no legacy retained ACL must ever be published to access/{{id}}/acl"
+    );
+
+    // The pure build_acl helper remains accessible if inspectable
+    let payload = {
+        let store = store.lock().expect("store lock");
+        build_acl(&store, &master, chrono::Utc::now()).expect("build acl")
+    };
     let entries = payload["entries"].as_array().expect("entries array");
-    assert_eq!(entries.len(), 1, "active tag is distributed");
+    assert_eq!(entries.len(), 1, "active tag is built in pure builder");
     assert_eq!(entries[0]["uid"], UID_ACTIVE);
-
-    let uid = Uid::from_hex(UID_ACTIVE).expect("uid hex");
-    let expected_key = hex::encode(diversify(&master, &uid).0);
-    assert_eq!(entries[0]["key"], expected_key, "diversified key only");
-
-    let expiry = entries[0]["expiry"].as_str().expect("expiry string");
-    let expiry_dt = chrono::DateTime::parse_from_rfc3339(expiry).expect("rfc3339 expiry");
-    let now = chrono::Utc::now();
-    let cap = now + chrono::Duration::days(35);
-    assert!(
-        expiry_dt.with_timezone(&chrono::Utc) <= cap,
-        "expiry {expiry} must be within 35 days"
-    );
-    assert!(
-        expiry_dt.with_timezone(&chrono::Utc) > now,
-        "expiry must be in the future"
-    );
-    assert!(payload["generated_at"].is_string(), "generated_at present");
 
     spawned.presence_task.abort();
     spawned.acl_task.abort();

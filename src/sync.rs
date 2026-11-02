@@ -203,7 +203,14 @@ async fn apply_users(store: Arc<Mutex<Store>>, users: Vec<AuthentikUser>) -> Res
                 .optional()
                 .context("Failed to check member active_until")?;
 
-            let active_until_changed = old_active_until.as_deref() != Some(&active_until);
+            let active_until_changed = match old_active_until.as_deref() {
+                Some(old) => {
+                    let old_date = old.get(..10);
+                    let new_date = active_until.get(..10);
+                    old_date != new_date
+                }
+                None => true,
+            };
 
             tx.execute(
                 "INSERT INTO members (member_key, display_name, active_until, source, phone)
